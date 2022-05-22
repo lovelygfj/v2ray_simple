@@ -9,16 +9,33 @@ import (
 	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/utils"
+	"github.com/pires/go-proxyproto"
 	"go.uber.org/zap"
 )
 
-func loopAccept(listener net.Listener, acceptFunc func(net.Conn)) {
+var (
+	//你可以通过向这个map插入 自定义函数的方式 来拓展 vs的 监听功能, 可以监听 其它 net包无法监听的 network
+	CustomListenerMap = make(map[string]func(address string) (net.Listener, error))
+)
+
+func loopAccept(listener net.Listener, xver int, acceptFunc func(net.Conn)) {
+	if xver > 0 {
+
+		if ce := utils.CanLogDebug("Listening PROXY protocol"); ce != nil {
+			ce.Write(zap.Int("preferred version", xver))
+		}
+
+		listener = &proxyproto.Listener{Listener: listener, Policy: proxyProtocolListenPolicyFunc}
+	}
+
+	var tooManyRetryCount time.Duration = 1
+
 	for {
 		newc, err := listener.Accept()
 		if err != nil {
 			errStr := err.Error()
-			if strings.Contains(errStr, "closed") {
-				if ce := utils.CanLogDebug("local connection closed"); ce != nil {
+			if strings.Contains(errStr, "close") {
+				if ce := utils.CanLogDebug("netLayer.loopAccept, listener got closed"); ce != nil {
 					ce.Write(zap.Error(err))
 
 				}
@@ -28,33 +45,45 @@ func loopAccept(listener net.Listener, acceptFunc func(net.Conn)) {
 				ce.Write(zap.Error(err))
 			}
 			if strings.Contains(errStr, "too many") {
-				if ce := utils.CanLogWarn("To many incoming conn! Will Sleep."); ce != nil {
-					ce.Write(zap.String("err", errStr))
+				if ce := utils.CanLogWarn("Too many incoming conns! Will Sleep."); ce != nil {
+					ce.Write(zap.String("err", errStr), zap.Int64("tooManyRetryCount", int64(tooManyRetryCount)))
 
 				}
-				time.Sleep(time.Millisecond * 500)
+				if tooManyRetryCount > 20 {
+					utils.Fatal("Too many incoming conns for 20 times! we will exit program to prevent infinite loop.")
+					break
+				}
+				time.Sleep(time.Millisecond * 500 * tooManyRetryCount)
+				tooManyRetryCount++
+				continue
 			}
-			continue
+			//在 Close这个listener后，会遇到 EOF 错误，所以除了too many的特殊情况外，应该 直接退出才对.
+			break
 		}
 		go acceptFunc(newc)
 	}
 }
 
+/*
 func loopAcceptUDP(uc net.UDPConn, acceptFunc func([]byte, *net.UDPAddr)) {
 	for {
 		p := utils.GetPacket()
 		n, addr, err := uc.ReadFromUDP(p)
 		if err != nil {
+			if ce := utils.CanLogWarn("loopAcceptUDP failed to accept"); ce != nil {
+				ce.Write(zap.Error(err))
+			}
 			break
 		}
 		go acceptFunc(p[:n], addr)
 	}
 }
+*/
 
 // ListenAndAccept 试图监听 tcp, udp 和 unix domain socket 这三种传输层协议.
 //
 // 非阻塞，在自己的goroutine中监听.
-func ListenAndAccept(network, addr string, sockopt *Sockopt, acceptFunc func(net.Conn)) (listener net.Listener, err error) {
+func ListenAndAccept(network, addr string, sockopt *Sockopt, xver int, acceptFunc func(net.Conn)) (listener net.Listener, err error) {
 	if addr == "" || acceptFunc == nil {
 		return nil, utils.ErrNilParameter
 	}
@@ -80,7 +109,9 @@ func ListenAndAccept(network, addr string, sockopt *Sockopt, acceptFunc func(net
 			SetSockOptForListener(tcplistener, sockopt, false, ta.IP.To4() == nil)
 		}
 
-		go loopAccept(tcplistener, acceptFunc)
+		go loopAccept(tcplistener, xver, acceptFunc)
+
+		listener = tcplistener
 
 	case "udp", "udp4", "udp6":
 
@@ -96,7 +127,7 @@ func ListenAndAccept(network, addr string, sockopt *Sockopt, acceptFunc func(net
 		if err != nil {
 			return
 		}
-		go loopAccept(listener, acceptFunc)
+		go loopAccept(listener, xver, acceptFunc)
 
 	case "unix":
 		// 参考 https://eli.thegreenplace.net/2019/unix-domain-sockets-in-go/
@@ -123,12 +154,24 @@ func ListenAndAccept(network, addr string, sockopt *Sockopt, acceptFunc func(net
 		fallthrough
 	default:
 
-		listener, err = net.Listen(network, addr)
+		if len(CustomListenerMap) > 0 {
+			if f := CustomListenerMap[network]; f != nil {
+				listener, err = f(addr)
+				if err != nil {
+					return
+				}
+			}
+		}
+
+		if listener == nil {
+			listener, err = net.Listen(network, addr)
+		}
+
 		if err != nil {
 			return
 		}
 
-		go loopAccept(listener, acceptFunc)
+		go loopAccept(listener, xver, acceptFunc)
 
 	}
 	return

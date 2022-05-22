@@ -1,0 +1,51 @@
+# 本文件 可 测试socks 的 dial, 以及密码认证 等功能 是否可用；socks5进，socks5出，然后又socks5进，direct出
+
+# 另外你可以看到，listen、dial和 route的顺序是可以打乱的，
+#  这样 自己可以方便地  把相关联 的配置 放在一起。
+
+[[listen]]
+tag = "my_socks5_1"
+protocol = "socks5"
+host = "127.0.0.1" 
+port = 10800       
+
+[[dial]]
+protocol = "socks5"  
+tag = "dial1"
+host = "127.0.0.1"  
+port = 10801
+
+#uuid = "user:very\npass:simple"
+uuid = "user:admin\npass:nimda"
+
+[[route]]
+fromTag = ["my_socks5_1"]
+toTag = "dial1"
+
+[[listen]]
+tag = "my_socks5_2"   
+protocol = "socks5" 
+host = "127.0.0.1"
+port = 10801
+
+#下面给出 toml的 多行字符串 格式 的 本作 的 uuid 的user和pass 格式 的 示范:
+
+uuid = """
+user:admin
+pass:nimda
+"""
+
+# 上面这个格式 根据toml的规范，头部是没有 \n 的，但是尾部多了一个 \n, 不过不用担心，我们程序会修剪掉末尾的换行符.
+
+# 或者这种，但是看起来不太美观
+#uuid = "user:very\npass:simple"
+
+users = [ {user = "very", pass = "simple"}, {user = "v2ray", pass = "hard"} ]   #也可以用users 来存储多个用户
+
+[[dial]]
+tag = "direct"
+protocol = "direct"
+
+[[route]]
+fromTag = ["my_socks5_2"]
+toTag = "direct"

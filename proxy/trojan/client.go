@@ -23,7 +23,7 @@ type ClientCreator struct{}
 func (ClientCreator) NewClientFromURL(url *url.URL) (proxy.Client, error) {
 	uuidStr := url.User.Username()
 	c := Client{
-		password_hexStringBytes: SHA224_hexStringBytes(uuidStr),
+		User: NewUserByPlainTextPassword(uuidStr),
 	}
 
 	return &c, nil
@@ -34,17 +34,17 @@ func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
 	uuidStr := dc.Uuid
 
 	c := Client{
-		password_hexStringBytes: SHA224_hexStringBytes(uuidStr),
-		use_mux:                 dc.Mux,
+		use_mux: dc.Mux,
+		User:    NewUserByPlainTextPassword(uuidStr),
 	}
 
 	return &c, nil
 }
 
 type Client struct {
-	proxy.ProxyCommonStruct
-	password_hexStringBytes []byte
-	use_mux                 bool
+	proxy.Base
+	User
+	use_mux bool
 }
 
 func (*Client) Name() string {
@@ -59,6 +59,10 @@ func (c *Client) HasInnerMux() (int, string) {
 		return 0, ""
 
 	}
+}
+
+func (c *Client) GetUser() utils.User {
+	return c.User
 }
 
 func WriteAddrToBuf(target netLayer.Addr, buf *bytes.Buffer) {
@@ -83,11 +87,12 @@ func WriteAddrToBuf(target netLayer.Addr, buf *bytes.Buffer) {
 
 func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLayer.Addr) (io.ReadWriteCloser, error) {
 	if target.Port <= 0 {
-		return nil, errors.New("Trojan Client Handshake failed, target port invalid")
+		return nil, errors.New("trojan Client Handshake failed, target port invalid")
 
 	}
 	buf := utils.GetBuf()
-	buf.Write(c.password_hexStringBytes)
+
+	buf.WriteString(c.AuthStr())
 	buf.Write(crlf)
 	if c.use_mux {
 		buf.WriteByte(CmdMux)
@@ -114,24 +119,30 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 		// 发现直接返回 underlay 反倒无法利用readv, 所以还是统一用包装过的. 目前利用readv是可以加速的.
 		return &UserTCPConn{
 			Conn:            underlay,
+			User:            c.User,
 			underlayIsBasic: netLayer.IsBasicConn(underlay),
 		}, nil
 	}
 
 }
 
-func (c *Client) EstablishUDPChannel(underlay net.Conn, target netLayer.Addr) (netLayer.MsgConn, error) {
+func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, target netLayer.Addr) (netLayer.MsgConn, error) {
 	if target.Port <= 0 {
-		return nil, errors.New("Trojan Client EstablishUDPChannel failed, target port invalid")
+		return nil, errors.New("trojan Client EstablishUDPChannel failed, target port invalid")
 
 	}
 	buf := utils.GetBuf()
-	buf.Write(c.password_hexStringBytes)
+	buf.WriteString(c.AuthStr())
 	buf.Write(crlf)
 	buf.WriteByte(CmdUDPAssociate)
 	WriteAddrToBuf(target, buf)
 
-	uc := NewUDPConn(underlay, nil)
+	uc := NewUDPConn(underlay, nil, c.IsFullcone)
+	uc.User = c.User
 	uc.handshakeBuf = buf
-	return uc, nil
+	if len(firstPayload) == 0 {
+		return uc, nil
+	} else {
+		return uc, uc.WriteMsgTo(firstPayload, target)
+	}
 }

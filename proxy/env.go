@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"sync"
 	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/httpLayer"
@@ -9,13 +10,35 @@ import (
 
 //used in real relay progress. See source code of v2ray_simple for details.
 type RoutingEnv struct {
-	RoutePolicy   *netLayer.RoutePolicy
-	MainFallback  *httpLayer.ClassicFallback
-	DnsMachine    *netLayer.DNSMachine
-	ClientsTagMap map[string]Client //用于分流到某个tag的Client, 所以需要知道所有的client
+	RoutePolicy  *netLayer.RoutePolicy
+	MainFallback *httpLayer.ClassicFallback
+	DnsMachine   *netLayer.DNSMachine
+
+	ClientsTagMap      map[string]Client //用于分流到某个tag的Client, 所以需要知道所有的client
+	ClientsTagMapMutex sync.RWMutex
 }
 
-func LoadEnvFromStandardConf(standardConf *StandardConf) (routingEnv RoutingEnv, Default_uuid string) {
+func (re *RoutingEnv) GetClient(tag string) (c Client) {
+	re.ClientsTagMapMutex.RLock()
+
+	c = re.ClientsTagMap[tag]
+	re.ClientsTagMapMutex.RUnlock()
+	return
+}
+func (re *RoutingEnv) SetClient(tag string, c Client) {
+	re.ClientsTagMapMutex.Lock()
+
+	re.ClientsTagMap[tag] = c
+	re.ClientsTagMapMutex.Unlock()
+}
+func (re *RoutingEnv) DelClient(tag string) {
+	re.ClientsTagMapMutex.Lock()
+
+	delete(re.ClientsTagMap, tag)
+	re.ClientsTagMapMutex.Unlock()
+}
+
+func LoadEnvFromStandardConf(standardConf *StandardConf) (routingEnv RoutingEnv) {
 
 	routingEnv.ClientsTagMap = make(map[string]Client)
 
@@ -31,8 +54,6 @@ func LoadEnvFromStandardConf(standardConf *StandardConf) (routingEnv RoutingEnv,
 
 	if appConf := standardConf.App; appConf != nil {
 
-		Default_uuid = appConf.DefaultUUID
-
 		hasAppLevelMyCountry = appConf.MyCountryISO_3166 != ""
 
 		if appConf.UDP_timeout != nil {
@@ -47,13 +68,16 @@ func LoadEnvFromStandardConf(standardConf *StandardConf) (routingEnv RoutingEnv,
 
 		netLayer.LoadMaxmindGeoipFile("")
 
-		routingEnv.RoutePolicy = netLayer.NewRoutePolicy()
+		rp := netLayer.NewRoutePolicy()
 		if hasAppLevelMyCountry {
-			routingEnv.RoutePolicy.AddRouteSet(netLayer.NewRouteSetForMyCountry(standardConf.App.MyCountryISO_3166))
+			rp.AddRouteSet(netLayer.NewRouteSetForMyCountry(standardConf.App.MyCountryISO_3166))
 
 		}
 
-		netLayer.LoadRulesForRoutePolicy(standardConf.Route, routingEnv.RoutePolicy)
+		rp.LoadRulesForRoutePolicy(standardConf.Route)
+
+		routingEnv.RoutePolicy = rp
+
 	}
 
 	return

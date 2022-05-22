@@ -1,7 +1,10 @@
 package httpLayer
 
 import (
+	"bytes"
 	"errors"
+	"net"
+	"net/http"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 )
@@ -24,7 +27,7 @@ const (
 
 	all_non_default_fallbacktype_count = iota - 2
 
-	alpn_unspecified = 0
+	//alpn_unspecified = 0
 )
 
 const (
@@ -33,6 +36,17 @@ const (
 )
 
 var ErrShouldFallback = errors.New("will fallback")
+
+// http level fallback metadata
+type FallbackMeta struct {
+	net.Conn
+	H1RequestBuf *bytes.Buffer
+	Path         string
+	Method       string
+	IsH2         bool
+
+	H2Request *http.Request
+}
 
 func getfallbacktype_byindex(i int) byte {
 	return 1 << (i + 1)
@@ -54,8 +68,8 @@ type FallbackResult struct {
 	Xver int
 }
 
-func (ef *FallbackResult) GetFallback(ftype byte, _ ...string) *FallbackResult {
-	return ef
+func (r *FallbackResult) GetFallback(ftype byte, _ ...string) *FallbackResult {
+	return r
 }
 
 func (FallbackResult) SupportType() byte {
@@ -64,12 +78,15 @@ func (FallbackResult) SupportType() byte {
 
 type FallbackConf struct {
 	//可选
-	FromTag string `toml:"from" json:"from"` //which inServer triggered this fallback
+	FromTag []string `toml:"from" json:"from"` //which inServer triggered this fallback
 
-	Xver int `toml:"xver" json:"xver"` //if fallback, whether to use PROXY protocol, and which version
+	Xver int `toml:"xver" json:"xver"` //use PROXY protocol or not, and which version
 
-	//必填
-	Dest any `toml:"dest" json:"dest"` //see netLayer.NewAddrFromAny for details about "any" addr
+	//必填。
+	//see netLayer.NewAddrFromAny for details about "any" addr.
+	//
+	// 约定，如果该项是字符串 且 开头为@，则我们认为它给出的是 tag 名称，要将其替换为 实际 该tag的 listen  的地址。
+	Dest any `toml:"dest" json:"dest"`
 
 	//几种匹配方式，可选
 

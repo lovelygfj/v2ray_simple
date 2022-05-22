@@ -1,7 +1,7 @@
 /*
 Package netLayer contains definitions in network layer AND transport layer.
 
-本包有 geoip, geosite, route, udp, readv, splice, relay, dns, listen/dial/sockopt 等相关功能。
+本包有 geoip, geosite, route, udp, readv, splice, relay, dns, listen/dial/sockopt, proxy protocol 等相关功能。
 
 以后如果要添加 kcp 或 raw socket 等底层协议时，也要在此包 或子包里实现.
 
@@ -29,50 +29,21 @@ import (
 
 var (
 	// 如果机器没有ipv6地址, 就无法联通ipv6, 此时可以在dial时更快拒绝ipv6地址,
-	// 避免打印过多错误输出
-	machineCanConnectToIpv6 bool
+	// 避免打印过多错误输出.
+	weKnowThatWeDontHaveIPV6 bool
 
 	ErrMachineCantConnectToIpv6 = errors.New("ErrMachineCanConnectToIpv6")
 	ErrTimeout                  = errors.New("timeout")
 )
 
 //做一些网络层的资料准备工作, 可以优化本包其它函数的调用。
-func Prepare() {
-	machineCanConnectToIpv6 = HasIpv6Interface()
+func PrepareInterfaces() {
+	weKnowThatWeDontHaveIPV6 = !HasIpv6Interface()
 }
 
-func HasIpv6Interface() bool {
-
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		if ce := utils.CanLogErr("call net.InterfaceAddrs failed"); ce != nil {
-			ce.Write(zap.Error(err))
-		} else {
-			log.Println("call net.InterfaceAddrs failed", err)
-
-		}
-
-		return false
-	}
-
-	for _, address := range addrs {
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && !ipnet.IP.IsPrivate() && !ipnet.IP.IsLinkLocalUnicast() {
-			// IsLinkLocalUnicast: something starts with fe80:
-			// According to godoc, If ip is not an IPv4 address, To4 returns nil.
-			// This means it's ipv6
-			if ipnet.IP.To4() == nil {
-
-				if ce := utils.CanLogDebug("Has Ipv6Interface!"); ce != nil {
-					ce.Write()
-				} else {
-					log.Println("Has Ipv6Interface!")
-				}
-
-				return true
-			}
-		}
-	}
-	return false
+//c.SetDeadline(time.Time{})
+func PersistConn(c net.Conn) {
+	c.SetDeadline(time.Time{})
 }
 
 //net.IPConn, net.TCPConn, net.UDPConn, net.UnixConn
@@ -109,6 +80,12 @@ func IsStrUDP_network(s string) bool {
 	return false
 }
 
+// 返回它所包装前的 那一层 net.Conn, 不一定是 基本连接，
+// 所以仍然可以继续 被识别为 ConnWrapper 并继续解包.
+type ConnWrapper interface {
+	GetRawConn() net.Conn
+}
+
 // part of net.Conn
 type NetAddresser interface {
 	LocalAddr() net.Addr
@@ -139,3 +116,37 @@ type EasyNetAddresser struct {
 
 func (iw *EasyNetAddresser) LocalAddr() net.Addr  { return iw.LA }
 func (iw *EasyNetAddresser) RemoteAddr() net.Addr { return iw.RA }
+
+func HasIpv6Interface() bool {
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		if ce := utils.CanLogErr("call net.InterfaceAddrs failed"); ce != nil {
+			ce.Write(zap.Error(err))
+		} else {
+			log.Println("call net.InterfaceAddrs failed", err)
+
+		}
+
+		return false
+	}
+
+	for _, address := range addrs {
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && !ipnet.IP.IsPrivate() && !ipnet.IP.IsLinkLocalUnicast() {
+			// IsLinkLocalUnicast: something starts with fe80:
+			// According to godoc, If ip is not an IPv4 address, To4 returns nil.
+			// This means it's ipv6
+			if ipnet.IP.To4() == nil {
+
+				if ce := utils.CanLogDebug("Has Ipv6Interface!"); ce != nil {
+					ce.Write()
+				} else {
+					log.Println("Has Ipv6Interface!")
+				}
+
+				return true
+			}
+		}
+	}
+	return false
+}

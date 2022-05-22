@@ -17,16 +17,13 @@ Config Format  配置格式
 	verysimple -L socks5://sfdfsaf -D direct://
 
 
-Layer Definition
+Layer Discussion
 
 目前认为，一个传输过程大概由四个部分组成，基础连接（udp/tcp），TLS（可选），中间层（ws、grpc、http等，可选），具体协议（socks5，vless，trojan等）.
 
 其中，ws和grpc被认为是 高级应用层，http（伪装）属于 header 层.
 
-TLS - Transport Layer Security 顾名思义TLS作用于传输层，第四层，但是我们tcp也是第四层，所以在本项目中，认为不需要“会话层”，单独加一个专用于tls的层比较稳妥.
-
-正常OSI是7层，我们在这里规定一个 第八层和第九层，第八层就是 vless协议所在位置，第九层就是我们实际传输的承载数据.
-
+TLS - Transport Layer Security 顾名思义TLS作用于传输层，第四层，但是我们tcp也是第四层，所以在本项目中，认为不需要“会话层”，且单独加一个专用于tls的层比较稳妥.
 
 New Model - VSI 新的VSI 模型
 
@@ -48,7 +45,7 @@ New Model - VSI 新的VSI 模型
 
 所以第九层除了承载数据外, 还可以为 inner mux 层, 第十层可以为 inner proxy 层, 此时第11层才是承载数据.
 
-我们verysimple实际上就是 基于 “层” 的架构，或称 可分层结构.
+我们verysimple 的架构 实际上是 基于 “层” 的架构，或称 可分层结构. 如下:
 
 
 	11｜        --------------               （client real tcp/udp data)
@@ -132,7 +129,7 @@ advLayer文件夹 代表第七层, proxy文件夹代表第8层或第10层, 同�
 
 总之 verysimple 的思路就是，要不就完全扁平化，要不就完全分层。
 
-本作认为，所有的代理是都可以有tls层，http层和ws/grpc层的，所以就统一嵌入所有的代理协议的配置当中,直接扁平化了.
+本作认为，所有的代理是都可以有tls层、http层和ws/grpc这种advLayer 的，所以就统一嵌入所有的代理协议的配置当中,直接扁平化了.
 
 Contents of proxy package - proxy包内容
 
@@ -150,7 +147,18 @@ Server and Client
 
 在 inServer 中，我们负责监听未知连接；在 outClient 中，我们负责拨号特定目标服务器.
 
-proxy中默认实现了 direct 和 reject 这两种 Client
+proxy中默认实现了 direct 和 reject 这两种 Client。默认实现了 reject Server
 
+reject作为Client和Server 的作用基本是一致的，就是读取一下用户的请求，查看是否为 http请求，然后根据情况 返回 对应的 http1.1 的 4xx 响应，然后关闭连接。
+
+Comparison
+
+层级清晰、详细的好处就是 转发路径十分清晰，转发路径在读取完配置后就是确定的，性能可以得到提高。
+
+与本作架构对立的架构是 支持转发链 或者说 “链式转发” 的架构，如gost。
+
+实际上 v2ray的架构 更接近 gost 这种架构， 而本作的架构比较独特。
+
+目前本作架构基本上无法实现链式转发，如果要支持，要进行一些重构。应该是可以做到的。
 */
 package proxy

@@ -13,6 +13,11 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+const (
+	toLower = 'a' - 'A'      // for use with OR.
+	toUpper = ^byte(toLower) // for use with AND.
+)
+
 //return a clone of m with headers trimmed to one value
 func TrimHeaders(m map[string][]string) (result map[string][]string) {
 
@@ -22,6 +27,20 @@ func TrimHeaders(m map[string][]string) (result map[string][]string) {
 		result[k] = []string{v[rand.Intn(len(v))]}
 	}
 	return
+}
+
+// Algorithm below is like standard textproto/CanonicalMIMEHeaderKey, except
+// that it operates with slice of bytes and modifies it inplace without copying. copied from gobwas/ws
+func CanonicalizeHeaderKey(k []byte) {
+	upper := true
+	for i, c := range k {
+		if upper && 'a' <= c && c <= 'z' {
+			k[i] &= toUpper
+		} else if !upper && 'A' <= c && c <= 'Z' {
+			k[i] |= toLower
+		}
+		upper = c == '-'
+	}
 }
 
 //all values in template is given by real
@@ -51,14 +70,6 @@ func AllHeadersIn(template map[string][]string, realh http.Header) (ok bool, fir
 	return
 }
 
-/*
-观察v2ray的实现，在没有header时，还会添加一个 Date ，这个v2ray的文档里没提
-
-v2ray文档: https://www.v2fly.org/config/transport/tcp.html#noneheaderobject
-
-相关 v2ray代码: https://github.com/v2fly/v2ray-core/tree/master/transport/internet/headers/http/http.go
-*/
-
 type RequestHeader struct {
 	Version string              `toml:"version"` //默认值为 "1.1"
 	Method  string              `toml:"method"`  //默认值为 "GET"。
@@ -77,52 +88,54 @@ type ResponseHeader struct {
 type HeaderPreset struct {
 	Request  *RequestHeader  `toml:"request"`
 	Response *ResponseHeader `toml:"response"`
+
+	Strict bool `toml:"strict"`
 }
 
 // 将Header改为首字母大写
-func (hh *HeaderPreset) Prepare() {
-	if hh.Request != nil && len(hh.Request.Headers) > 0 {
+func (h *HeaderPreset) Prepare() {
+	if h.Request != nil && len(h.Request.Headers) > 0 {
 
 		var realHeaders http.Header = make(http.Header)
-		for k, vs := range hh.Request.Headers {
+		for k, vs := range h.Request.Headers {
 			for _, v := range vs {
 				realHeaders.Add(k, v)
 
 			}
 		}
 
-		hh.Request.Headers = realHeaders
+		h.Request.Headers = realHeaders
 	}
-	if hh.Response != nil && len(hh.Response.Headers) > 0 {
+	if h.Response != nil && len(h.Response.Headers) > 0 {
 
 		var realHeaders http.Header = make(http.Header)
-		for k, vs := range hh.Response.Headers {
+		for k, vs := range h.Response.Headers {
 			for _, v := range vs {
 				realHeaders.Add(k, v)
 
 			}
 		}
 
-		hh.Response.Headers = realHeaders
+		h.Response.Headers = realHeaders
 	}
 }
 
 //默认值保持与v2ray的配置相同
-func (hh *HeaderPreset) AssignDefaultValue() {
-	if hh.Request == nil {
-		hh.Request = &RequestHeader{}
+func (h *HeaderPreset) AssignDefaultValue() {
+	if h.Request == nil {
+		h.Request = &RequestHeader{}
 	}
-	if hh.Request.Version == "" {
-		hh.Request.Version = "1.1"
+	if h.Request.Version == "" {
+		h.Request.Version = "1.1"
 	}
-	if hh.Request.Method == "" {
-		hh.Request.Method = "GET"
+	if h.Request.Method == "" {
+		h.Request.Method = "GET"
 	}
-	if len(hh.Request.Path) == 0 {
-		hh.Request.Path = []string{"/"}
+	if len(h.Request.Path) == 0 {
+		h.Request.Path = []string{"/"}
 	}
-	if len(hh.Request.Headers) == 0 {
-		hh.Request.Headers = map[string][]string{
+	if len(h.Request.Headers) == 0 {
+		h.Request.Headers = map[string][]string{
 			"Host":            {"www.baidu.com", "www.bing.com"},
 			"User-Agent":      {"Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36", "Mozilla/5.0 (iPhone; CPU iPhone OS 10_0_2 like Mac OS X) AppleWebKit/601.1 (KHTML, like Gecko) CriOS/53.0.2785.109 Mobile/14A456 Safari/601.1.46"},
 			"Accept-Encoding": {"gzip, deflate"},
@@ -132,23 +145,23 @@ func (hh *HeaderPreset) AssignDefaultValue() {
 
 	}
 
-	if hh.Response == nil {
-		hh.Response = &ResponseHeader{}
+	if h.Response == nil {
+		h.Response = &ResponseHeader{}
 	}
 
-	if hh.Response.Version == "" {
-		hh.Response.Version = "1.1"
+	if h.Response.Version == "" {
+		h.Response.Version = "1.1"
 	}
 
-	if hh.Response.StatusCode == "" {
-		hh.Response.StatusCode = "200"
+	if h.Response.StatusCode == "" {
+		h.Response.StatusCode = "200"
 	}
-	if hh.Response.Reason == "" {
-		hh.Response.Reason = "OK"
+	if h.Response.Reason == "" {
+		h.Response.Reason = "OK"
 	}
 
-	if len(hh.Response.Headers) == 0 {
-		hh.Response.Headers = map[string][]string{
+	if len(h.Response.Headers) == 0 {
+		h.Response.Headers = map[string][]string{
 			"Content-Type":      {"application/octet-stream", "video/mpeg"},
 			"Transfer-Encoding": {"chunked"},
 			"Connection":        {"keep-alive"},
@@ -156,10 +169,10 @@ func (hh *HeaderPreset) AssignDefaultValue() {
 		}
 	}
 
-	hh.Prepare()
+	h.Prepare()
 }
 
-func (h *HeaderPreset) ReadRequest(underlay net.Conn) (err error, leftBuf *bytes.Buffer) {
+func (h *HeaderPreset) ReadRequest(underlay net.Conn) (leftBuf *bytes.Buffer, err error) {
 
 	var rp H1RequestParser
 	err = rp.ReadAndParse(underlay)
@@ -189,71 +202,76 @@ func (h *HeaderPreset) ReadRequest(underlay net.Conn) (err error, leftBuf *bytes
 	}
 	headerBytes := rp.WholeRequestBuf.Next(indexOfEnding)
 
-	indexOfFirstCRLF := bytes.Index(allbytes, []byte(CRLF))
+	if h.Strict {
+		indexOfFirstCRLF := bytes.Index(allbytes, []byte(CRLF))
 
-	headerBytes = headerBytes[indexOfFirstCRLF+2:]
+		headerBytes = headerBytes[indexOfFirstCRLF+2:]
 
-	headerBytesList := bytes.Split(headerBytes, []byte(CRLF))
-	matchCount := 0
-	for _, header := range headerBytesList {
-		//log.Println("ReadRequest read header", string(h))
-		hs := string(header)
-		ss := strings.Split(hs, ":")
-		if len(ss) != 2 {
-			err = utils.ErrInvalidData
-			return
-		}
-		key := strings.TrimLeft(ss[0], " ")
-		value := strings.TrimLeft(ss[1], " ")
-
-		thisList := h.Request.Headers[key]
-		if len(thisList) == 0 {
-
-			switch key {
-			case "Content-Length", "Date":
-				//go官方包会主动添加 Content-Length
-				// 而 v2ray 会 主动添加 Date
-			default:
-
-				err = utils.ErrInErr{ErrDesc: "ReadRequest failed, unknown header", ErrDetail: utils.ErrInvalidData, Data: hs}
+		headerBytesList := bytes.Split(headerBytes, []byte(CRLF))
+		matchCount := 0
+		for _, header := range headerBytesList {
+			//log.Println("ReadRequest read header", string(h))
+			hs := string(header)
+			ss := strings.SplitN(hs, ":", 2)
+			if len(ss) != 2 {
+				err = utils.ErrInvalidData
 				return
 			}
+			key := strings.TrimLeft(ss[0], " ")
+			value := strings.TrimLeft(ss[1], " ")
 
-		} else {
-			var ok bool
-			for _, v := range thisList {
-				if value == strings.TrimLeft(v, " ") {
-					ok = true
-					matchCount++
-					break
+			thisList := h.Request.Headers[key]
+			if len(thisList) == 0 {
+
+				switch key {
+				case "Content-Length", "Date":
+					//go官方包会主动添加 Content-Length
+					// 而 v2ray 会 主动添加 Date, 还会加 User-Agent: Go-http-client/1.1
+
+					//所以最好在配置文件中明示出 自己定义的 User-Agent
+				default:
+
+					err = utils.ErrInErr{ErrDesc: "ReadRequest failed, unknown header", ErrDetail: utils.ErrInvalidData, Data: hs}
+					return
+				}
+
+			} else {
+				var ok bool
+				for _, v := range thisList {
+					if value == strings.TrimLeft(v, " ") {
+						ok = true
+						matchCount++
+						break
+					}
+				}
+				if !ok {
+					err = utils.ErrInErr{ErrDesc: "ReadRequest failed, header content not match", ErrDetail: utils.ErrInvalidData, Data: hs}
+					return
 				}
 			}
-			if !ok {
-				err = utils.ErrInErr{ErrDesc: "ReadRequest failed, header content not match", ErrDetail: utils.ErrInvalidData, Data: hs}
-				return
-			}
+
+		} //for headerBytesList
+		if diff := len(h.Request.Headers) - matchCount; diff > 0 {
+			err = utils.ErrInErr{ErrDesc: "ReadRequest failed, not all headers given", ErrDetail: utils.ErrInvalidData, Data: diff}
+			return
 		}
 
-	} //for headerBytesList
-	if diff := len(h.Request.Headers) - matchCount; diff > 0 {
-		err = utils.ErrInErr{ErrDesc: "ReadRequest failed, not all headers given", ErrDetail: utils.ErrInvalidData, Data: diff}
-		return
 	}
 
 	rp.WholeRequestBuf.Next(4)
 
-	return nil, rp.WholeRequestBuf
+	return rp.WholeRequestBuf, nil
 }
 
-func (p *HeaderPreset) WriteRequest(underlay net.Conn, payload []byte) error {
+func (h *HeaderPreset) WriteRequest(underlay net.Conn, payload []byte) error {
 
 	buf := bytes.NewBuffer(payload)
-	r, err := http.NewRequest(p.Request.Method, p.Request.Path[0], buf)
+	r, err := http.NewRequest(h.Request.Method, h.Request.Path[0], buf)
 	if err != nil {
 		return err
 	}
 
-	nh := TrimHeaders(p.Request.Headers)
+	nh := TrimHeaders(h.Request.Headers)
 
 	r.Header = nh
 
@@ -263,7 +281,7 @@ func (p *HeaderPreset) WriteRequest(underlay net.Conn, payload []byte) error {
 	return r.Write(underlay)
 }
 
-func (p *HeaderPreset) ReadResponse(underlay net.Conn) (err error, leftBuf *bytes.Buffer) {
+func (h *HeaderPreset) ReadResponse(underlay net.Conn) (leftBuf *bytes.Buffer, err error) {
 
 	bs := utils.GetPacket()
 	var n int
@@ -286,21 +304,21 @@ func (p *HeaderPreset) ReadResponse(underlay net.Conn) (err error, leftBuf *byte
 
 	buf := bytes.NewBuffer(bs[indexOfEnding+4 : n])
 
-	return nil, buf
+	return buf, nil
 }
 
-func (p *HeaderPreset) WriteResponse(underlay net.Conn, payload []byte) error {
+func (h *HeaderPreset) WriteResponse(underlay net.Conn, payload []byte) error {
 	buf := utils.GetBuf()
 
 	buf.WriteString("HTTP/")
-	buf.WriteString(p.Response.Version)
+	buf.WriteString(h.Response.Version)
 	buf.WriteString(" ")
-	buf.WriteString(p.Response.StatusCode)
+	buf.WriteString(h.Response.StatusCode)
 	buf.WriteString(" ")
-	buf.WriteString(p.Response.Reason)
+	buf.WriteString(h.Response.Reason)
 	buf.WriteString(CRLF)
 
-	for key, v := range p.Response.Headers {
+	for key, v := range h.Response.Headers {
 		thisStr := v[rand.Intn(len(v))]
 		buf.WriteString(key)
 		buf.WriteString(":")
@@ -333,51 +351,51 @@ type HeaderConn struct {
 	notFirstWrite bool
 }
 
-func (pc *HeaderConn) Read(p []byte) (n int, err error) {
+func (c *HeaderConn) Read(p []byte) (n int, err error) {
 	var buf *bytes.Buffer
 
-	if pc.IsServerEnd {
-		if pc.optionalReader == nil {
-			err, buf = pc.H.ReadRequest(pc.Conn)
+	if c.IsServerEnd {
+		if c.optionalReader == nil {
+			buf, err = c.H.ReadRequest(c.Conn)
 			if err != nil {
 				err = utils.ErrInErr{ErrDesc: "http HeaderConn Read failed, at serverEnd", ErrDetail: err}
 				return
 			}
 
-			pc.optionalReader = io.MultiReader(buf, pc.Conn)
+			c.optionalReader = io.MultiReader(buf, c.Conn)
 		}
 
 	} else {
-		if pc.optionalReader == nil {
-			err, buf = pc.H.ReadResponse(pc.Conn)
+		if c.optionalReader == nil {
+			buf, err = c.H.ReadResponse(c.Conn)
 			if err != nil {
 				err = utils.ErrInErr{ErrDesc: "http HeaderConn Read failed", ErrDetail: err}
 				return
 			}
 
-			pc.optionalReader = io.MultiReader(buf, pc.Conn)
+			c.optionalReader = io.MultiReader(buf, c.Conn)
 		}
 	}
-	return pc.optionalReader.Read(p)
+	return c.optionalReader.Read(p)
 
 }
 
-func (pc *HeaderConn) Write(p []byte) (n int, err error) {
+func (c *HeaderConn) Write(p []byte) (n int, err error) {
 
-	if pc.IsServerEnd {
-		if pc.notFirstWrite {
-			return pc.Conn.Write(p)
+	if c.IsServerEnd {
+		if c.notFirstWrite {
+			return c.Conn.Write(p)
 		}
-		pc.notFirstWrite = true
-		err = pc.H.WriteResponse(pc.Conn, p)
+		c.notFirstWrite = true
+		err = c.H.WriteResponse(c.Conn, p)
 
 	} else {
 
-		if pc.notFirstWrite {
-			return pc.Conn.Write(p)
+		if c.notFirstWrite {
+			return c.Conn.Write(p)
 		}
-		pc.notFirstWrite = true
-		err = pc.H.WriteRequest(pc.Conn, p)
+		c.notFirstWrite = true
+		err = c.H.WriteRequest(c.Conn, p)
 	}
 
 	if err != nil {

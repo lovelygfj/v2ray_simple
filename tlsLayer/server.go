@@ -6,6 +6,7 @@ import (
 	"unsafe"
 
 	"github.com/e1732a364fed/v2ray_simple/utils"
+	"golang.org/x/exp/slices"
 )
 
 type Server struct {
@@ -13,21 +14,26 @@ type Server struct {
 }
 
 //如 certFile, keyFile 有一项没给出，则会自动生成随机证书
-func NewServer(host, certFile, keyFile string, isInsecure bool, alpnList []string) (*Server, error) {
+func NewServer(host string, certConf *CertConf, isInsecure bool, alpnList []string, minver uint16) (*Server, error) {
 
-	certArray, err := GetCertArrayFromFile(certFile, keyFile)
+	//发现服务端必须给出 http/1.1 等，否则不会协商出这个alpn，而我们为了回落，是需要协商出所有可能需要的 alpn的。
 
-	if err != nil {
-		return nil, err
+	//而且我们如果不提供 h1 和 h2 的alpn的话，很容易被审查者察觉的。
+
+	if alpnList == nil {
+		alpnList = []string{"http/1.1", "h2"}
+	} else {
+
+		if !slices.Contains(alpnList, "http/1.1") {
+			alpnList = append(alpnList, "http/1.1")
+		}
+		if !slices.Contains(alpnList, "h2") {
+			alpnList = append(alpnList, "h2")
+		}
 	}
 
 	s := &Server{
-		tlsConfig: &tls.Config{
-			InsecureSkipVerify: isInsecure,
-			ServerName:         host,
-			Certificates:       certArray,
-			NextProtos:         alpnList,
-		},
+		tlsConfig: GetTlsConfig(isInsecure, true, alpnList, host, certConf, minver),
 	}
 
 	return s, nil

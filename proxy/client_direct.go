@@ -9,7 +9,10 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-const DirectName = "direct"
+const (
+	DirectName = "direct"
+	DirectURL  = DirectName + "://"
+)
 
 //implements ClientCreator for direct
 type DirectCreator struct{}
@@ -17,23 +20,16 @@ type DirectCreator struct{}
 func (DirectCreator) NewClientFromURL(url *url.URL) (Client, error) {
 	d := &DirectClient{}
 
-	nStr := url.Query().Get("fullcone")
-	if nStr == "true" || nStr == "1" {
-		d.isfullcone = true
-	}
-
 	return d, nil
 }
 
 func (DirectCreator) NewClient(dc *DialConf) (Client, error) {
 	d := &DirectClient{}
-	d.isfullcone = dc.Fullcone
 	return d, nil
 }
 
 type DirectClient struct {
-	ProxyCommonStruct
-	isfullcone bool
+	Base
 }
 
 func (*DirectClient) Name() string { return DirectName }
@@ -62,6 +58,16 @@ func (d *DirectClient) Handshake(underlay net.Conn, firstPayload []byte, target 
 }
 
 //direct的Client的 EstablishUDPChannel 直接 监听一个udp端口，无视传入的net.Conn.
-func (d *DirectClient) EstablishUDPChannel(_ net.Conn, target netLayer.Addr) (netLayer.MsgConn, error) {
-	return netLayer.NewUDPMsgConn(nil, d.isfullcone, false)
+func (d *DirectClient) EstablishUDPChannel(_ net.Conn, firstPayload []byte, target netLayer.Addr) (netLayer.MsgConn, error) {
+	if len(firstPayload) == 0 {
+		return netLayer.NewUDPMsgConn(nil, d.IsFullcone, false)
+
+	} else {
+		mc, err := netLayer.NewUDPMsgConn(nil, d.IsFullcone, false)
+		if err != nil {
+			return nil, err
+		}
+		return mc, mc.WriteMsgTo(firstPayload, target)
+
+	}
 }

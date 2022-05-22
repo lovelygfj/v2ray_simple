@@ -12,11 +12,15 @@ import (
 
 type UDPConn struct {
 	net.Conn
+
+	utils.V2rayUser //在 Server握手成功后会设置这一项.
+
 	optionalReader io.Reader
 
 	remainFirstBufLen int
 
-	version     int
+	version int
+
 	udp_multi   bool
 	isClientEnd bool
 
@@ -26,13 +30,19 @@ type UDPConn struct {
 	raddr    netLayer.Addr
 
 	handshakeBuf *bytes.Buffer
+
+	fullcone bool
 }
 
 func (u *UDPConn) CloseConnWithRaddr(raddr netLayer.Addr) error {
 	return u.Close()
 }
 func (u *UDPConn) Fullcone() bool {
-	return u.version != 0
+	return u.fullcone && u.version != 0
+}
+
+func (u *UDPConn) GetProtocolVersion() int {
+	return u.version
 }
 
 func (u *UDPConn) WriteMsgTo(p []byte, raddr netLayer.Addr) error {
@@ -186,7 +196,10 @@ func (u *UDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
 					bs, err := u.readData_with_len()
 					return bs, u.raddr, err
 				case 1:
-					raddr, err := GetAddrFrom(u.bufr)
+					raddr, err := netLayer.V2rayGetAddrFrom(u.bufr)
+					if err != nil {
+						return nil, raddr, err
+					}
 					bs, err := u.readData_with_len()
 					return bs, raddr, err
 				}
@@ -196,7 +209,10 @@ func (u *UDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
 				return bs, u.raddr, err
 			}
 		} else {
-			raddr, err := GetAddrFrom(u.bufr)
+			raddr, err := netLayer.V2rayGetAddrFrom(u.bufr)
+			if err != nil {
+				return nil, raddr, err
+			}
 			bs, err := u.readData_with_len()
 
 			return bs, raddr, err

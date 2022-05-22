@@ -16,7 +16,7 @@ var PDD bool //print tls detect detail
 var OnlyTest bool
 
 func init() {
-	//log.SetOutput(os.Stdout) //主要是日志太多，如果都能直接用管道放到文件中就好了，默认不是Stdout所以优点尴尬，操作麻烦点
+	//log.SetOutput(os.Stdout) //主要是日志太多，如果都能直接用管道放到文件中就好了，默认不是Stdout所以有点尴尬，操作麻烦点
 
 	flag.BoolVar(&PDD, "pdd", false, "print tls detect detail")
 	flag.BoolVar(&OnlyTest, "ot", false, "only detect tls, doesn't actually mark tls")
@@ -26,8 +26,8 @@ func init() {
 // 用于 探测 承载数据是否使用了tls, 它先与 底层tcp连接 进行 数据传输，然后查看传输到内容
 // 	可以参考 https://www.baeldung.com/linux/tcpdump-capture-ssl-handshake
 type SniffConn struct {
-	net.Conn //这个 Conn本DetectConn 中不会用到，只是为了能让CopyConn支持 net.Conn
-	W        *DetectWriter
+	net.Conn //这个 Conn本DetectConn 中不会用到，只是为了能让 SniffConn 支持 net.Conn
+	W        *DetectLazyWriter
 	R        *DetectReader
 
 	RawConn *net.TCPConn // 这个是为了让外界能够直接拿到底层的连接
@@ -51,8 +51,8 @@ func (cc *SniffConn) ReadFrom(r io.Reader) (int64, error) {
 }
 
 //可选两个参数传入，优先使用rw ，为nil的话 再使用oldConn，作为 DetectConn 的 Read 和Write的 具体调用的主体
-// is_secure 表示，是否使用更强的过滤手段（越强越浪费时间）
-func NewSniffConn(oldConn net.Conn, rw io.ReadWriter, isclient bool, is_secure bool) *SniffConn {
+// is_secure 表示，是否使用更强的过滤手段（越强越浪费时间, 但是越安全）
+func NewSniffConn(oldConn net.Conn, rw io.ReadWriter, isclient bool, is_secure bool, sniffedFirstPart *ComSniff) *SniffConn {
 
 	var validOne io.ReadWriter = rw
 	if rw == nil {
@@ -61,33 +61,29 @@ func NewSniffConn(oldConn net.Conn, rw io.ReadWriter, isclient bool, is_secure b
 
 	cc := &SniffConn{
 		Conn: oldConn,
-		W: &DetectWriter{
+		W: &DetectLazyWriter{
 			Writer: validOne,
 		},
 		R: &DetectReader{
 			Reader: validOne,
 		},
 	}
-	cc.W.isclient = isclient
-	cc.R.isclient = isclient
-	cc.W.is_secure = is_secure
-	cc.R.is_secure = is_secure
+	if sniffedFirstPart != nil {
+		cc.R.ComSniff = *sniffedFirstPart
+	}
+	cc.W.Isclient = isclient
+	cc.R.Isclient = isclient
+	cc.W.Is_secure = is_secure
+	cc.R.Is_secure = is_secure
 
 	cc.W.peer = &cc.R.ComSniff
 	cc.R.peer = &cc.W.ComSniff
 
-	if netConn := oldConn.(*net.TCPConn); netConn != nil {
-		//log.Println("NewDetectConn: get netConn!")	// 如果是客户端的socks5，网页浏览的话这里一定能转成 TCPConn, 不信取消注释试试
+	if netConn, ok := oldConn.(*net.TCPConn); ok && netConn != nil {
 		cc.RawConn = netConn
 	}
 
 	return cc
-}
-
-//是 proxy.UserContainer 的子集
-type UserHaser interface {
-	HasUserByBytes(bs []byte) bool
-	UserBytesLen() int
 }
 
 type ComSniff struct {
@@ -96,30 +92,27 @@ type ComSniff struct {
 
 	SpecialCommandBytes []byte //目前规定，使用uuid作为special command
 
-	UH UserHaser //为了在服务端能确认一串数据确实是有效的uuid，需要使用 UserHaser
+	Auther utils.UserAuther //为了在服务端能确认一串数据确实是有效的uuid，需要使用 UserHaser
 
-	SniffedHostName string
+	SniffedServerName string
 
-	isclient  bool
-	is_secure bool
+	ShouldSniffAlpn bool
+	SniffedAlpnList []string
+
+	Isclient  bool //是否是tls拨号端
+	Is_secure bool
 
 	packetCount int
 
-	handShakePass bool //握手测试通过
-	handshakeVer  uint16
+	helloPacketPass bool //hello包测试通过
+	handshakeVer    uint16
 
 	handshakeFailReason int
 
-	cantBeTLS13 bool //clienthello如果没有 supported_versions项，or 该项没有0304，则不可能协商出tls1.3。如果协商出了则是错误的;
+	CantBeTLS13 bool //clienthello如果没有 supported_versions项，or 该项没有0304，则不可能协商出tls1.3。如果协商出了则是错误的;
 
 	peer *ComSniff //握手是需要判断clienthello+serverhello的，而它们一个是读一个是写，所以要能够让它们相互访问到之前判断好的数据
 }
-
-const (
-	CutType_big byte = iota + 1
-	CutType_small
-	CutType_fit
-)
 
 func (c *ComSniff) incr() {
 	c.packetCount++
@@ -129,8 +122,12 @@ func (c *ComSniff) GetFailReason() int {
 	return c.handshakeFailReason
 }
 
-// 总之，如果读写都用同样的判断代码的话，客户端和服务端应该就能同步进行 相同的TLS判断
-func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
+func (c *ComSniff) HasHandshakePassed() bool {
+	return c.helloPacketPass
+}
+
+// 总之，如果读写都用同样的判断代码的话，客户端和服务端应该就能同步进行 相同的TLS判断。首包时p长度至少为1，非首包时p长度至少为3，否则会panic
+func (cd *ComSniff) CommonDetect(p []byte, isRead bool, onlyForSni bool) {
 
 	/*
 		我们把tls的细节放在这个注释里，便于参考
@@ -321,6 +318,11 @@ func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
 			cd.DefinitelyNotTLS = true
 			cd.handshakeFailReason = 2
 
+			//if PDD {
+			//	log.Println("p0 != 22", p)
+
+			//}
+
 			//只是不是握手信息， 有可能还是tls其它信息？可能是close alert等情况？这里应该再加一些处理，否则有时网页会打不开，刷新一下才能打开。
 			return
 		}
@@ -329,6 +331,7 @@ func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
 		if p[9] != 3 {
 			cd.DefinitelyNotTLS = true
 			cd.handshakeFailReason = 4
+
 			return
 		}
 		if p[10] == 0 || p[10] > 4 {
@@ -354,7 +357,7 @@ func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
 			return
 		}
 
-		if cd.is_secure && cd.isclient {
+		if (cd.Is_secure && cd.Isclient) || onlyForSni {
 
 			//VersionTLS10,VersionTLS11,VersionTLS12,VersionTLS13
 			handshakeVer := uint16(p[10]) | uint16(p[9])<<8
@@ -370,7 +373,8 @@ func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
 						return
 					}
 
-					cd.sniff_hello(pAfter, true) //代码很长！
+					cd.sniff_hello(pAfter, true, onlyForSni) //代码很长！
+
 					if cd.DefinitelyNotTLS {
 						return
 					}
@@ -388,23 +392,23 @@ func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
 							return
 						}
 
-						cd.sniff_hello(pAfter, false) //代码很长！
+						cd.sniff_hello(pAfter, false, false) //代码很长！
 						if cd.DefinitelyNotTLS {
 							return
 						}
-					} else {
-						//可能吗？
+					} //else {
+					//可能吗？
 
-					}
+					//}
 				}
 			}
 		}
 
-		cd.handShakePass = true
+		cd.helloPacketPass = true
 
 		return
 
-	} else if !cd.handShakePass {
+	} else if !cd.helloPacketPass {
 		cd.DefinitelyNotTLS = true
 		return
 	}
@@ -417,7 +421,7 @@ func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
 			// 就是说，同样是Write，服务端是在Write判断完后，发送特殊指令
 			// 而客户端是在 Write的判断过程中，检索特殊指令
 			// 说白了，就是在 服务端-> 客户端 这个方向发生的，
-			if cd.isclient && n >= len(cd.SpecialCommandBytes) {
+			if cd.Isclient && n >= len(cd.SpecialCommandBytes) {
 
 				if bytes.Equal(cd.SpecialCommandBytes, p[:len(cd.SpecialCommandBytes)]) {
 
@@ -434,13 +438,13 @@ func (cd *ComSniff) commonDetect(p []byte, isRead bool) {
 			// 这里是不会被黑客攻击的，因为事件发生在第二个/更往后的 数据包中，而vless的uuid检验则是从第一个就要开始检验。也不会遇到重放攻击，因为tls每次加密的秘文都是不一样的。
 
 			//这里就是服务端来读取 特殊指令
-			if !cd.isclient {
+			if !cd.Isclient {
 
-				ubl := cd.UH.UserBytesLen()
+				ubl := cd.Auther.AuthBytesLen()
 
 				if n >= ubl {
 
-					if cd.UH.HasUserByBytes(p[:ubl]) {
+					if cd.Auther.AuthUserByBytes(p[:ubl]) != nil {
 						bs := utils.GetBytes(ubl)
 						copy(bs, p[:ubl])
 						cd.SpecialCommandBytes = bs
@@ -524,7 +528,7 @@ func commonFilterStep(err error, cd *ComSniff, p []byte, isRead bool) {
 	}
 
 	if len(p) > 3 {
-		cd.commonDetect(p, isRead)
+		cd.CommonDetect(p, isRead, false)
 	}
 
 }
@@ -578,14 +582,14 @@ func (dr *DetectReader) Read(p []byte) (n int, err error) {
 	return
 }
 
-// DetectReader 对每个Read的数据进行分析，判断是否是tls流量
-type DetectWriter struct {
+// DetectLazyWriter 对每个Read的数据进行分析，判断是否是tls流量, 并在合适时机写入lazy的特殊指令。
+type DetectLazyWriter struct {
 	io.Writer
 	ComSniff
 }
 
 // 直接写入，而不进行探测
-func (dw *DetectWriter) SimpleWrite(p []byte) (n int, err error) {
+func (dw *DetectLazyWriter) SimpleWrite(p []byte) (n int, err error) {
 	n, err = dw.Writer.Write(p)
 	return
 }
@@ -604,7 +608,7 @@ func (dw *DetectWriter) SimpleWrite(p []byte) (n int, err error) {
 //总之，我们在客户端的 Write 操作，就是 外界试图使用我们的 Write 写入数据.
 //所以在socks5后面 使用的这个 Write， 应该是把 服务端的响应 写回 socks5，比如 serverhello 之类
 //服务端的 Write 操作，也是读 serverhello.
-func (dw *DetectWriter) Write(p []byte) (n int, err error) {
+func (dw *DetectLazyWriter) Write(p []byte) (n int, err error) {
 	//write和Read不一样，Write是，p现在就具有所有的已知信息，所以我们先过滤，然后再发送到远端
 
 	if dw.IsTls {
@@ -617,7 +621,7 @@ func (dw *DetectWriter) Write(p []byte) (n int, err error) {
 	// 经过判断之后，确认是 tls了，则我们缓存这个记录， 然后通过tls发送特殊指令
 	if dw.IsTls {
 
-		if dw.isclient {
+		if dw.Isclient {
 			// 客户端 DetectConn的Write被调用的话，那就是从 服务端的 tls连接中 提取出了新数据，准备通过socks5发往浏览器
 			//
 			//客户端判断出IsTLS，那就是收到了特殊指令，p的头部就是特殊指令；p后面可能还跟 数据
@@ -650,6 +654,10 @@ func (dw *DetectWriter) Write(p []byte) (n int, err error) {
 			// 此处也是不需要保存 要直连发送的数据p 的，在main.go里去直接操作就行
 			// 我们在这里发送特殊指令即可。
 
+			if PDD {
+				log.Println("lazy start to write SpecialCommandBytes,", dw.SpecialCommandBytes)
+			}
+
 			n, err = dw.Writer.Write(dw.SpecialCommandBytes)
 
 			if err == nil {
@@ -663,13 +671,14 @@ func (dw *DetectWriter) Write(p []byte) (n int, err error) {
 	}
 	n, err = dw.Writer.Write(p)
 
-	if PDD {
-		//log.Println("DetectWriter,W, 原本", len(p), "实际写入了", n, dw.Writer)
-	}
+	//if PDD {
+	//log.Println("DetectWriter,W, 原本", len(p), "实际写入了", n, dw.Writer)
+	//}
 
 	return
 }
 
+//为-1表示 p长度不够长，无法获取到下一个tls记录
 func GetTlsRecordNextIndex(p []byte) int {
 	if len(p) < 5 {
 		return -1

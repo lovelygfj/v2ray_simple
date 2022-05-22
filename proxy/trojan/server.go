@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/proxy"
@@ -21,33 +20,43 @@ type ServerCreator struct{}
 func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 	uuidStr := lc.Uuid
 
-	s := &Server{
-		userHashes: make(map[string]bool),
-	}
+	s := newServer(uuidStr)
 
-	s.userHashes[SHA224_hexString(uuidStr)] = true
+	if len(lc.Users) > 0 {
+		s.LoadUsers(InitUsers(lc.Users))
+	}
 
 	return s, nil
 }
 
 func (ServerCreator) NewServerFromURL(url *url.URL) (proxy.Server, error) {
 	uuidStr := url.User.Username()
-	s := &Server{
-		userHashes: make(map[string]bool),
-	}
-
-	s.userHashes[SHA224_hexString(uuidStr)] = true
+	s := newServer(uuidStr)
 
 	return s, nil
 }
 
+func newServer(plainPassStr string) *Server {
+	s := &Server{
+		MultiUserMap: utils.NewMultiUserMap(),
+	}
+	s.StoreKeyByStr = true
+	s.AuthBytesToStrFunc = PassBytesToStr
+	s.AuthStrToBytesFunc = PassStrToBytes
+	s.TheAuthBytesLen = passBytesLen
+
+	if plainPassStr != "" {
+		s.AddUser(NewUserByPlainTextPassword(plainPassStr))
+	}
+
+	return s
+}
+
 //implements proxy.Server
 type Server struct {
-	proxy.ProxyCommonStruct
+	proxy.Base
 
-	userHashes map[string]bool
-
-	//mux4Hashes sync.RWMutex
+	*utils.MultiUserMap
 }
 
 func (*Server) Name() string {
@@ -58,13 +67,17 @@ func (*Server) HasInnerMux() (int, string) {
 	return 1, "simplesocks"
 }
 
+func (*Server) CanFallback() bool {
+	return true
+}
+
 //若握手步骤数据不对, 会返回 ErrDetail 为 utils.ErrInvalidData 的 utils.ErrInErr
 func (s *Server) Handshake(underlay net.Conn) (result net.Conn, msgConn netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
-	if err := underlay.SetReadDeadline(time.Now().Add(time.Second * 4)); err != nil {
+	if err := proxy.SetCommonReadTimeout(underlay); err != nil {
 		returnErr = err
 		return
 	}
-	defer underlay.SetReadDeadline(time.Time{})
+	defer netLayer.PersistConn(underlay)
 
 	readbs := utils.GetBytes(utils.MTU)
 
@@ -97,16 +110,28 @@ errorPart:
 
 realPart:
 
-	if wholeReadLen < 56+8+1 {
+	if wholeReadLen < passStrLen+8+1 {
 		returnErr = utils.ErrInErr{ErrDesc: "handshake len too short", ErrDetail: utils.ErrInvalidData, Data: wholeReadLen}
 		goto errorPart
 	}
 
 	//可参考 https://github.com/p4gefau1t/trojan-go/blob/master/tunnel/trojan/server.go
 
-	hash := readbuf.Next(56)
+	hash := readbuf.Next(passStrLen)
 	hashStr := string(hash)
-	if !s.userHashes[hashStr] {
+	var theUser utils.User
+	ok := false
+
+	if len(hash) != passStrLen {
+
+	} else {
+		theUser = s.AuthUserByStr(hashStr)
+		if theUser != nil {
+			ok = true
+		}
+	}
+
+	if !ok {
 		returnErr = utils.ErrInErr{ErrDesc: "hash not match", ErrDetail: utils.ErrInvalidData, Data: hashStr}
 		goto errorPart
 	}
@@ -177,16 +202,18 @@ realPart:
 	}
 
 	if isudp {
-		return nil, NewUDPConn(underlay, io.MultiReader(readbuf, underlay)), targetAddr, nil
+		uc := NewUDPConn(underlay, io.MultiReader(readbuf, underlay), s.IsFullcone)
+		uc.User = theUser.(User)
+		return nil, uc, targetAddr, nil
 
 	} else {
 		// 发现直接返回 underlay 反倒无法利用readv, 所以还是统一用包装过的. 目前利用readv是可以加速的.
 
 		return &UserTCPConn{
 			Conn:              underlay,
+			User:              theUser.(User),
 			optionalReader:    io.MultiReader(readbuf, underlay),
 			remainFirstBufLen: readbuf.Len(),
-			hash:              hashStr,
 			underlayIsBasic:   netLayer.IsBasicConn(underlay),
 			isServerEnd:       true,
 		}, nil, targetAddr, nil

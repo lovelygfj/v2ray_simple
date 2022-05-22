@@ -1,7 +1,28 @@
-//Package http implements an http proxy server
+/*Package http implements http proxy for proxy.Server.
+
+Reference
+
+rfc: https://datatracker.ietf.org/doc/html/rfc7231#section-4.3.6
+
+about basic auth:
+
+https://en.wikipedia.org/wiki/Basic_access_authentication
+
+
+https://datatracker.ietf.org/doc/html/rfc7617
+
+example header:
+
+	Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==
+
+
+*/
 package http
 
 import (
+	"bytes"
+	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/url"
@@ -15,7 +36,12 @@ import (
 
 const Name = "http"
 
-var connectReturnBytes = []byte("HTTP/1.1 200 Connection established\r\n\r\n")
+var (
+	connectReturnBytes    = []byte("HTTP/1.1 200 Connection established\r\n\r\n")
+	basicAuthValue_prefix = []byte("Basic ")
+
+	proxyAuth_headerBytes = []byte("Proxy-Authorization")
+)
 
 func init() {
 	proxy.RegisterServer(Name, &ServerCreator{})
@@ -24,26 +50,57 @@ func init() {
 type ServerCreator struct{}
 
 func (ServerCreator) NewServerFromURL(u *url.URL) (proxy.Server, error) {
-	//只有地址和port需要配置，非常简单, 而且都是在通用部分 ProxyCommonStruct 被配置过了, 不需再记录
 
-	// TODO: Support Basic Auth
-
-	s := &Server{}
+	s := NewServer()
+	var userPass utils.UserPass
+	if userPass.InitWithUrl(u) {
+		s.AddUser(&userPass)
+	}
 	return s, nil
 }
 
-func (ServerCreator) NewServer(dc *proxy.ListenConf) (proxy.Server, error) {
-	s := &Server{}
+func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
+	s := NewServer()
+	if str := lc.Uuid; str != "" {
+		var userPass utils.UserPass
+		if userPass.InitWithStr(str) {
+			s.AddUser(&userPass)
+		} else {
+			if ce := utils.CanLogWarn("http: user and password format malformed. Will not use default uuid"); ce != nil {
+				ce.Write()
+			}
+		}
+	}
+
+	if len(lc.Users) > 0 {
+		for _, uc := range lc.Users {
+			up := utils.NewUserPass(uc)
+			s.AddUser(up)
+		}
+	}
+
 	return s, nil
 }
 
 //implements proxy.Server
 type Server struct {
-	proxy.ProxyCommonStruct
+	proxy.Base
+
+	*utils.MultiUserMap
+
+	OnlyConnect bool //是否仅支持Connect命令; 如果为true, 则直接通过 GET http://xxx 这种请求不再被认为是有效的。之前本以为connect就可以搞定一切，后来实测发现 wget 确实在 非https时 会用 纯http请求的方式 请求代理。所以 一般 OnlyConnect 为 false即可.
 }
 
-func (*Server) CanFallback() bool {
-	return false //true //暂时不考虑回落，下次再说
+func NewServer() *Server {
+	s := &Server{
+		MultiUserMap: utils.NewMultiUserMap(),
+	}
+	s.StoreKeyByStr = true
+	return s
+}
+
+func (s *Server) CanFallback() bool {
+	return true
 }
 
 func (*Server) Name() string {
@@ -51,8 +108,13 @@ func (*Server) Name() string {
 }
 
 func (s *Server) Handshake(underlay net.Conn) (newconn net.Conn, _ netLayer.MsgConn, targetAddr netLayer.Addr, err error) {
+
+	if err = proxy.SetCommonReadTimeout(underlay); err != nil {
+		return
+	}
+	defer netLayer.PersistConn(underlay)
+
 	var bs = utils.GetMTU() //一般要获取请求信息，不需要那么长; 就算是http，加了path，也不用太长
-	//因为要储存为 firstdata，所以也无法直接放回
 
 	n := 0
 
@@ -62,25 +124,62 @@ func (s *Server) Handshake(underlay net.Conn) (newconn net.Conn, _ netLayer.MsgC
 		return
 	}
 
+	defer func() {
+		if err != nil {
+			err = utils.ErrBuffer{
+				Buf: bytes.NewBuffer(bs[:n]),
+				Err: err,
+			}
+		}
+	}()
+
 	//rfc: https://datatracker.ietf.org/doc/html/rfc7231#section-4.3.6
 	// "CONNECT is intended only for use in requests to a proxy.  " 总之CONNECT命令专门用于代理.
 	// GET如果 path也是带 http:// 头的话，也是可以的，但是这种只适用于http代理，无法用于https。
 
-	_, method, path, failreason := httpLayer.GetRequestMethod_and_PATH_from_Bytes(bs[:n], true)
+	_, method, path, headers, failreason := httpLayer.ParseH1Request(bs[:n], true)
 	if failreason != 0 {
 		err = utils.ErrInErr{ErrDesc: "get method/path failed", ErrDetail: utils.ErrInvalidData, Data: []any{method, failreason}}
 
-		//一个正常的http代理如果遇到了 格式不符的情况的话是要返回 400 等错误代码的
-		// 但是，也不能说不返回400的就是异常服务器，因为这可能是服务器自己的策略，无视一切错误请求，比如防黑客时就常常会如此.
-		// 所以我们就直接return即可
-		//
-		//不过另外注意，连method都没有，那么就没有回落的可能性
-
-		utils.PutBytes(bs)
 		return
 	}
 
-	//log.Println("GetRequestMethod_and_PATH_from_Bytes", method, URL, "data:", string(b[:n]))
+	if len(s.IDMap) > 0 {
+		var ok bool
+		failReason := 0
+		for _, h := range headers {
+
+			if bytes.Equal(h.Head, proxyAuth_headerBytes) {
+				if !bytes.HasPrefix(h.Value, basicAuthValue_prefix) {
+					failReason = 1
+					break
+				}
+				bs := utils.GetMTU()
+				n, err = base64.StdEncoding.Decode(bs, h.Value[len(basicAuthValue_prefix):])
+				if err != nil {
+					failReason = 2
+					break
+				}
+				colonIndex := bytes.IndexByte(bs[:n], ':')
+				if colonIndex < 0 {
+					failReason = 3
+					break
+				}
+
+				thisUP := utils.NewUserPassByData(bs[:colonIndex], bs[colonIndex+1:n])
+
+				if s.AuthUserByStr(thisUP.AuthStr()) != nil {
+					ok = true
+				}
+
+				break
+			}
+		}
+		if !ok {
+			err = utils.ErrInErr{ErrDesc: "http require auth not got no valid user/header", ErrDetail: utils.ErrInvalidData, Data: failReason}
+			return
+		}
+	}
 
 	var isCONNECT bool
 
@@ -94,17 +193,20 @@ func (s *Server) Handshake(underlay net.Conn) (newconn net.Conn, _ netLayer.MsgC
 		addressStr = path //实测都会自带:443, 也就不需要我们额外判断了
 
 	} else {
+		if s.OnlyConnect {
+			err = errors.New("non-connect method not supported")
+			return
+		}
 
 		hostPortURL, err2 := url.Parse(path)
 		if err2 != nil {
 			err = err2
 
-			utils.PutBytes(bs)
 			return
 		}
 		addressStr = hostPortURL.Host
 
-		if strings.Index(hostPortURL.Host, ":") == -1 { //host不带端口， 默认80
+		if !strings.Contains(hostPortURL.Host, ":") { //host不带端口， 默认80
 			addressStr = hostPortURL.Host + ":80"
 		}
 	}
@@ -112,7 +214,6 @@ func (s *Server) Handshake(underlay net.Conn) (newconn net.Conn, _ netLayer.MsgC
 	targetAddr, err = netLayer.NewAddr(addressStr)
 	if err != nil {
 
-		utils.PutBytes(bs)
 		return
 	}
 	//如果使用CONNECT方式进行代理，需先向客户端表示连接建立完毕

@@ -5,6 +5,13 @@ import (
 	"net"
 	"syscall"
 	"time"
+
+	"github.com/e1732a364fed/v2ray_simple/utils"
+)
+
+var (
+	//你可以通过向这个map插入 自定义函数的方式 来拓展 vs的 拨号功能, 可以拨号 其它 net包无法拨号的 network
+	CustomDialerMap = make(map[string]func(address string, timeout time.Duration) (net.Conn, error))
 )
 
 func (a *Addr) Dial() (net.Conn, error) {
@@ -12,7 +19,7 @@ func (a *Addr) Dial() (net.Conn, error) {
 	var resultConn net.Conn
 	var err error
 
-	switch a.Network {
+	switch n := a.Network; n {
 	case "":
 		a.Network = "tcp"
 		goto tcp
@@ -24,12 +31,17 @@ func (a *Addr) Dial() (net.Conn, error) {
 	case "udp", "udp4", "udp6":
 		ua := a.ToUDPAddr()
 
-		if !machineCanConnectToIpv6 && a.IP.To4() == nil {
+		if weKnowThatWeDontHaveIPV6 && a.IP.To4() == nil {
 			return nil, ErrMachineCantConnectToIpv6
 		}
 
 		return DialUDP(ua)
 	default:
+		if len(CustomDialerMap) > 0 {
+			if f := CustomDialerMap[n]; f != nil {
+				return f(a.String(), time.Second*15)
+			}
+		}
 
 		goto defaultPart
 
@@ -41,29 +53,50 @@ tcp:
 
 	if a.IP != nil {
 		if a.IP.To4() == nil {
-			if !machineCanConnectToIpv6 {
+			if weKnowThatWeDontHaveIPV6 {
 				return nil, ErrMachineCantConnectToIpv6
 			} else {
 
-				resultConn, err = net.DialTCP("tcp6", nil, &net.TCPAddr{
+				tcpConn, err2 := net.DialTCP("tcp6", nil, &net.TCPAddr{
 					IP:   a.IP,
 					Port: a.Port,
 				})
+
+				if err2 == nil {
+					tcpConn.SetWriteBuffer(utils.MaxPacketLen) //有时不设置writebuffer时，会遇到 write: no buffer space available 错误, 在实现vmess的 ChunkMasking 时 遇到了该问题。
+
+				}
+
+				resultConn, err = tcpConn, err2
 				goto dialedPart
 			}
 		} else {
 
-			resultConn, err = net.DialTCP("tcp4", nil, &net.TCPAddr{
+			tcpConn, err2 := net.DialTCP("tcp4", nil, &net.TCPAddr{
 				IP:   a.IP,
 				Port: a.Port,
 			})
+
+			if err2 == nil {
+				tcpConn.SetWriteBuffer(utils.MaxPacketLen)
+
+			}
+
+			resultConn, err = tcpConn, err2
+
 			goto dialedPart
 		}
 
 	}
 
 defaultPart:
-	resultConn, err = net.DialTimeout(a.Network, a.String(), time.Second*15)
+	if istls {
+		resultConn, err = net.DialTimeout("tcp", a.String(), time.Second*15)
+
+	} else {
+		resultConn, err = net.DialTimeout(a.Network, a.String(), time.Second*15)
+
+	}
 
 dialedPart:
 	if istls && err == nil {

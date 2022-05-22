@@ -13,9 +13,10 @@ import (
 )
 
 type RuleConf struct {
-	DialTag any `toml:"dialTag"`
+	DialTag any `toml:"toTag"`
 
-	InTags []string `toml:"inTag"`
+	InTags []string `toml:"fromTag"`
+	Users  []string `toml:"user"`
 
 	Countries []string `toml:"country"` // 如果类似 !CN, 则意味着专门匹配不为CN 的国家（目前还未实现）
 	IPs       []string `toml:"ip"`
@@ -23,10 +24,9 @@ type RuleConf struct {
 	Network   []string `toml:"network"`
 }
 
-func LoadRulesForRoutePolicy(rules []*RuleConf, policy *RoutePolicy) {
+func (policy *RoutePolicy) LoadRulesForRoutePolicy(rules []*RuleConf) {
 	for _, rc := range rules {
-		newrs := LoadRuleForRouteSet(rc)
-		policy.List = append(policy.List, newrs)
+		policy.List = append(policy.List, LoadRuleForRouteSet(rc))
 	}
 }
 
@@ -106,9 +106,29 @@ func LoadRuleForRouteSet(rule *RuleConf) (rs *RouteSet) {
 		rs.InTags[t] = true
 	}
 
-	//ip 过滤 需要 分辨 cidr 和普通ip
+	for _, u := range rule.Users {
+		rs.Users[u] = true
+	}
+
+	//ip 过滤 需要 分辨 "private", cidr 和普通ip
 
 	for _, ipStr := range rule.IPs {
+		if ipStr == "private" {
+
+			//https://www.arin.net/reference/research/statistics/address_filters/
+
+			if _, net, err := net.ParseCIDR("10.0.0.0/8"); err == nil {
+				rs.NetRanger.Insert(cidranger.NewBasicRangerEntry(*net))
+			}
+			if _, net, err := net.ParseCIDR("172.16.0.0/12"); err == nil {
+				rs.NetRanger.Insert(cidranger.NewBasicRangerEntry(*net))
+			}
+			if _, net, err := net.ParseCIDR("192.168.0.0/16"); err == nil {
+				rs.NetRanger.Insert(cidranger.NewBasicRangerEntry(*net))
+			}
+
+			continue
+		}
 		if strings.Contains(ipStr, "/") {
 			if _, net, err := net.ParseCIDR(ipStr); err == nil {
 				rs.NetRanger.Insert(cidranger.NewBasicRangerEntry(*net))

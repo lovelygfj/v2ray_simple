@@ -13,6 +13,15 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
+//配置文件格式
+const (
+	SimpleMode = iota
+	StandardMode
+	V2rayCompatibleMode
+
+	ErrStrNoListenUrl = "no listen URL provided"
+)
+
 type AppConf struct {
 	LogLevel          *int    `toml:"loglevel"` //需要为指针, 否则无法判断0到底是未给出的默认值还是 显式声明的0
 	LogFile           *string `toml:"logfile"`
@@ -70,33 +79,36 @@ func LoadConfig(configFileName, listenURL, dialURL string, jsonMode int) (standa
 			standardConf, err = LoadTomlConfFile(fpath)
 			if err != nil {
 
-				log.Printf("can not load standard config file: %s\n", err)
-				confMode = -1
-				return
+				log.Printf("can not load standard config file: %v, \n", err)
+				goto url
+
 			}
 
 			confMode = StandardMode
 
-			return
 		} else {
 
 			confMode = SimpleMode
 			simpleConf, mainFallback, err = loadSimpleConf_byFile(fpath)
+
 		}
 
+		return
+
+	}
+url:
+	if listenURL != "" {
+		log.Printf("trying listenURL and dialURL \n")
+
+		confMode = SimpleMode
+		simpleConf, err = loadSimpleConf_byUrl(listenURL, dialURL)
 	} else {
 
-		if listenURL != "" {
-			log.Printf("No Such Config File:%s,will try using -L,-D parameter \n", configFileName)
-
-			confMode = SimpleMode
-			simpleConf, err = loadSimpleConf_byUrl(listenURL, dialURL)
-		} else {
-			log.Printf("no -L listen URL provided \n")
-			err = errors.New("no -L listen URL provided")
-			confMode = -1
-			return
-		}
+		log.Println(ErrStrNoListenUrl)
+		err = errors.New(ErrStrNoListenUrl)
+		confMode = -1
+		return
 	}
+
 	return
 }

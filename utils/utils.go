@@ -3,10 +3,17 @@ package utils
 
 import (
 	"flag"
+	"os"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 )
+
+// 本来可以直接用 fmt.Print, 但是那个Print多了一次到any的装箱，所以如果只
+// 打印一个字符串的话，不妨直接调用 os.Stdout.WriteString(str)。
+func PrintStr(str string) {
+	os.Stdout.WriteString(str)
+}
 
 func IsFlagGiven(name string) bool {
 	found := false
@@ -37,6 +44,16 @@ var GivenFlags map[string]*flag.Flag
 func ParseFlags() {
 	flag.Parse()
 	GivenFlags = GetGivenFlags()
+}
+
+//return kv pairs for GivenFlags
+func GivenFlagKVs() (r map[string]string) {
+	r = map[string]string{}
+
+	for k, f := range GivenFlags {
+		r[k] = f.Value.String()
+	}
+	return
 }
 
 //移除 = "" 和 = false 的项

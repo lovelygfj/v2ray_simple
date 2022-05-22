@@ -10,19 +10,21 @@ import (
 
 	"github.com/e1732a364fed/v2ray_simple/httpLayer"
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
+	"github.com/e1732a364fed/v2ray_simple/proxy"
 	"github.com/e1732a364fed/v2ray_simple/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
 
+//implements advLayer.MuxServer
 type Server struct {
 	Creator
 
 	Config
 
-	Headers *httpLayer.HeaderPreset
-
 	http2.Server
+
+	Headers *httpLayer.HeaderPreset
 
 	path string
 
@@ -33,7 +35,7 @@ type Server struct {
 
 	closed bool
 
-	underlay net.Conn
+	underlay net.Conn //目前仅用于Close
 }
 
 func (s *Server) GetPath() string {
@@ -57,10 +59,73 @@ func (s *Server) Stop() {
 	})
 }
 
+var (
+	clientPreface = []byte(http2.ClientPreface)
+)
+
 func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fallbackConnChan chan httpLayer.FallbackMeta) {
 	s.underlay = underlay
 	s.fallbackConnChan = fallbackConnChan
 	s.newSubConnChan = newSubConnChan
+
+	//先过滤一下h2c 的 preface. 因为不是h2c的话，依然可以试图回落到 h1.
+
+	//可以参考 golang.org/x/net/http2/server.go 里的 readPreface 方法.
+
+	bs := utils.GetPacket()
+	proxy.SetCommonReadTimeout(underlay)
+
+	var notH2c bool
+	n, err := underlay.Read(bs)
+	if err != nil {
+		if ce := utils.CanLogDebug("grpc try read preface failed"); ce != nil {
+			ce.Write()
+		}
+
+		return
+
+	} else if n < len(clientPreface) || !bytes.Equal(bs[:len(clientPreface)], clientPreface) {
+		notH2c = true
+	}
+
+	netLayer.PersistConn(underlay)
+
+	firstBuf := bytes.NewBuffer(bs[:n])
+
+	if notH2c {
+		if ce := utils.CanLogInfo("grpc got not h2c request"); ce != nil {
+			ce.Write()
+		}
+
+		if fallbackConnChan != nil {
+			_, method, path, _, failreason := httpLayer.ParseH1Request(bs, false)
+			if failreason != 0 {
+
+				fallbackConnChan <- httpLayer.FallbackMeta{
+					Conn:         underlay,
+					H1RequestBuf: firstBuf,
+				}
+			} else {
+				fallbackConnChan <- httpLayer.FallbackMeta{
+					Path:         path,
+					Method:       method,
+					Conn:         underlay,
+					H1RequestBuf: firstBuf,
+				}
+			}
+		} else {
+			underlay.Write([]byte(httpLayer.Err403response))
+			underlay.Close()
+		}
+
+		return
+	}
+
+	underlay = &netLayer.ReadWrapper{
+		Conn:              underlay,
+		OptionalReader:    io.MultiReader(firstBuf, underlay),
+		RemainFirstBufLen: n,
+	}
 
 	go s.Server.ServeConn(underlay, &http2.ServeConnOpts{
 		Handler: http.HandlerFunc(func(rw http.ResponseWriter, rq *http.Request) {
@@ -69,21 +134,6 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 			}
 
 			//log.Println("request headers", rq.Header)
-			/*
-				we will try to fallback to h2c.
-
-				about h2c
-
-				https://pkg.go.dev/golang.org/x/net/http2/h2c#example-NewHandler
-				https://github.com/thrawn01/h2c-golang-example
-
-				test h2c:
-
-				curl -k -v --http2-prior-knowledge https://localhost:4434/sfd
-
-				curl -k -v --http2-prior-knowledge -X POST -F 'asdf=1234'  https://localhost:4434/sfd
-
-			*/
 
 			shouldFallback := false
 
@@ -105,29 +155,16 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 				//try check customized header
 
 				if s.Headers != nil && s.Headers.Request != nil && len(s.Headers.Request.Headers) > 0 {
-					for k, vs := range s.Headers.Request.Headers {
-						this := rq.Header.Get(k)
 
-						matched := false
+					if ok, fnmk := httpLayer.AllHeadersIn(s.Headers.Request.Headers, rq.Header); !ok {
 
-						if this != "" {
-							for _, v := range vs {
-								if v == this {
-									matched = true
-									break
-								}
-							}
+						if ce := utils.CanLogWarn("GRPC Server has custom header configured, but the client request have notMatched Header(s)"); ce != nil {
+							ce.Write(zap.String("firstNotMatchKey", fnmk))
 						}
 
-						if !matched {
-							if ce := utils.CanLogWarn("GRPC Server has custom header configured, but the client request doesn't have this"); ce != nil {
-								ce.Write(zap.String("supposed header", k), zap.Any("supposed value list", vs), zap.String("got value", this))
-							}
-
-							shouldFallback = true
-						}
-
+						shouldFallback = true
 					}
+
 				}
 			}
 
@@ -144,8 +181,6 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 							zap.String("raddr", rq.RemoteAddr))
 					}
 
-					var buf *bytes.Buffer
-
 					respConn := &netLayer.IOWrapper{
 						Reader:    rq.Body,
 						Writer:    rw,
@@ -157,22 +192,8 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 						Conn: respConn,
 					}
 
-					// 如果使用 rq.Write， 那么实际上就是回落到 http1.1, 只有用 http2.Transport.RoundTrip 才是 h2 请求
-
-					//因为h2的特殊性，要建立子连接, 所以要配合调用者 进行特殊处理。
-
-					if s.FallbackToH1 {
-						buf = utils.GetBuf()
-						rq.Write(buf)
-
-						respConn.FirstWriteChan = make(chan struct{})
-
-						fm.H1RequestBuf = buf
-
-					} else {
-						fm.IsH2 = true
-						fm.H2Request = rq
-					}
+					fm.IsH2 = true
+					fm.H2Request = rq
 
 					if s.closed {
 						return
@@ -224,6 +245,10 @@ func newServerConn(rw http.ResponseWriter, rq *http.Request) (sc *ServerConn) {
 	ta, e := net.ResolveTCPAddr("tcp", rq.RemoteAddr)
 	if e == nil {
 		sc.ra = ta
+	} else {
+		if ce := utils.CanLogErr("grpcSimple parse addr failed, which is weird"); ce != nil {
+			ce.Write(zap.String("raddr", rq.RemoteAddr), zap.Error(e))
+		}
 	}
 
 	sc.timeouter = timeouter{
@@ -246,35 +271,37 @@ type ServerConn struct {
 	closed    bool
 }
 
-func (g *ServerConn) Close() error {
-	g.closeOnce.Do(func() {
-		g.closed = true
-		close(g.closeChan)
-		if g.Closer != nil {
-			g.Closer.Close()
+func (sc *ServerConn) Close() error {
+	sc.closeOnce.Do(func() {
+		sc.closed = true
+		close(sc.closeChan)
+		if sc.Closer != nil {
+			sc.Closer.Close()
 
 		}
 	})
 	return nil
 }
 
-func (g *ServerConn) Write(b []byte) (n int, err error) {
+func (sc *ServerConn) Write(b []byte) (n int, err error) {
 
 	//the determination of g.closed is necessary, or it might panic when calling Write or Flush
 
-	if g.closed {
+	if sc.closed {
 		return 0, net.ErrClosed
 	} else {
+
 		buf := commonWrite(b)
 
-		if g.closed {
+		if sc.closed { //较为谨慎，也许commonWrite 刚调用完, 就 g.closed 了
+			utils.PutBuf(buf)
 			return 0, net.ErrClosed
 		}
-		_, err = g.Writer.Write(buf.Bytes())
+		_, err = sc.Writer.Write(buf.Bytes())
 		utils.PutBuf(buf)
 
-		if err == nil && !g.closed {
-			g.Writer.(http.Flusher).Flush() //necessary
+		if err == nil && !sc.closed {
+			sc.Writer.(http.Flusher).Flush() //necessary
 
 		}
 

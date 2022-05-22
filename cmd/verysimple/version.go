@@ -13,9 +13,13 @@ import (
 
 	"github.com/e1732a364fed/v2ray_simple/advLayer"
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
+	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-const delimiter = "===============================\n"
+const (
+	desc      = "A very simple implementation of V2Ray with some innovation\n"
+	delimiter = "===============================\n"
+)
 
 var Version string = "[version_undefined]" //版本号可由 -ldflags "-X 'main.Version=v1.x.x'" 指定, 本项目的Makefile就是用这种方式确定版本号
 
@@ -26,27 +30,25 @@ func versionStr() string {
 		advList = append(advList, c.PackageID())
 	}
 
-	return fmt.Sprintf("verysimple %s, %s %s %s, with advLayer packages: %v", Version, runtime.Version(), runtime.GOOS, runtime.GOARCH, advList)
+	return fmt.Sprintf("verysimple %s, %s %s %s, with advLayer packages: %v \n", Version, runtime.Version(), runtime.GOOS, runtime.GOARCH, advList)
 }
 
 func printVersion_simple() {
-	fmt.Printf(versionStr())
-	fmt.Printf("\n")
+	utils.PrintStr(versionStr())
 }
 
+//printVersion 返回的信息 可以唯一确定一个编译文件的 版本以及 build tags.
 func printVersion() {
 
-	fmt.Printf(delimiter)
+	utils.PrintStr(delimiter)
 	printVersion_simple()
-	fmt.Printf(delimiter)
+	utils.PrintStr(delimiter)
 
-	const desc = "A very simple implementation of V2Ray with some innovation"
-	fmt.Printf(desc)
-	fmt.Printf("\n")
+	utils.PrintStr(desc)
 
 	if netLayer.HasEmbedGeoip() {
-		fmt.Printf("Contains embedded Geoip file\n")
+		utils.PrintStr("Contains embedded Geoip file\n")
 	}
-	fmt.Printf(delimiter)
+	utils.PrintStr(delimiter)
 
 }

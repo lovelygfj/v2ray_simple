@@ -1,7 +1,9 @@
 package ws
 
 import (
+	"bytes"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +21,12 @@ import (
 // 683 * 4 = 2732, 若你不信，运行 we_test.go中的 TestBase64Len
 const MaxEarlyDataLen_Base64 = 2732
 
+var (
+	connectionBs = []byte("Connection")
+	upgradeBs    = []byte("Upgrade")
+)
+
+//implements advLayer.SingleServer
 type Server struct {
 	Creator
 	UseEarlyData   bool
@@ -92,22 +100,49 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 	var rp httpLayer.H1RequestParser
 	re := rp.ReadAndParse(underlay)
 	if re != nil {
-		if re == httpLayer.ErrNotHTTP_Request {
-			if ce := utils.CanLogErr("WS check ErrNotHTTP_Request"); ce != nil {
-				ce.Write()
-			}
+		if errors.Is(re, httpLayer.ErrNotHTTP_Request) {
+
+			return nil, utils.ErrInErr{ErrDesc: "WS check parse http failed", ErrDetail: httpLayer.ErrNotHTTP_Request}
 
 		} else {
-			if ce := utils.CanLogErr("WS check handshake read failed"); ce != nil {
-				ce.Write(zap.Error(re))
-			}
+
+			return nil, utils.ErrInErr{ErrDesc: "WS check handshake read failed", ErrDetail: re}
+
 		}
-		return nil, utils.ErrInvalidData
 	}
 
 	optionalFirstBuffer := rp.WholeRequestBuf
 
-	if rp.Method != "GET" || s.Thepath != rp.Path {
+	notWsRequest := false
+
+	//因为 gobwas 会先自行给错误的连接 返回 错误信息，而这不行，所以我们先过滤一遍。
+	//header 我们只过滤一个 connection 就行. 要是怕攻击者用 “对的path,method 和错误的header” 进行探测,
+	// 那你设一个复杂的path就ok了。
+
+	if rp.Method != "GET" || s.Thepath != rp.Path || len(rp.Headers) == 0 {
+		notWsRequest = true
+
+	} else {
+		hasUpgrade := false
+		for _, rh := range rp.Headers {
+			httpLayer.CanonicalizeHeaderKey(rh.Head)
+			if bytes.Equal(rh.Head, connectionBs) {
+
+				httpLayer.CanonicalizeHeaderKey(rh.Value)
+				if bytes.Equal(rh.Value, upgradeBs) {
+
+					hasUpgrade = true
+					break
+				}
+			}
+		}
+		if !hasUpgrade {
+			notWsRequest = true
+		}
+
+	}
+
+	if notWsRequest {
 		return httpLayer.FallbackMeta{
 			Conn:         underlay,
 			H1RequestBuf: optionalFirstBuffer,
@@ -116,7 +151,6 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 		}, httpLayer.ErrShouldFallback
 	}
 
-	theWrongPath := ""
 	var thePotentialEarlyData []byte
 
 	requestHeaderNotGivenCount := s.requestHeaderCheckCount
@@ -133,27 +167,6 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 		//我们这里就是先用 httpLayer 过滤 再和 buffer一起传入 ws 包
 		// ReadBufferSize默认是 4096，已经够大
 
-		OnRequest: func(uri []byte) error {
-			struri := string(uri)
-			if struri != s.Thepath {
-
-				theWrongPath = struri
-
-				//return utils.NewDataErr("ws path not match", nil, struri[:min])
-				//发现这个错误除了在程序里返回外，还会直接显示到 浏览器上！这会被探测到的。
-				// 所以只能显示标准http错误, 然后通过闭包的方式 把path信息传递到外部.
-				if ce := utils.CanLogWarn("ws path not match"); ce != nil {
-					min := len(s.Thepath)
-					if len(struri) < min {
-						min = len(struri)
-					}
-					//log.Println("ws path not match", struri[:min])
-					ce.Write(zap.String("wrong path", struri[:min]))
-				}
-				return ws.RejectConnectionError(ws.RejectionStatus(http.StatusBadRequest))
-			}
-			return nil
-		},
 		OnHeader: func(key, value []byte) error {
 			if s.noNeedToCheckRequestHeaders {
 				return nil
@@ -208,9 +221,7 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 				// 传来的并不是base64数据，可能是其它访问我们网站websocket的情况，但是一般我们path复杂都会过滤掉，所以直接认为这是非法的
 				return "", false
 			}
-			//if len(bs) != 0 && utils.CanLogDebug() {
-			//	log.Println("Got New ws earlydata", len(bs), bs)
-			//}
+
 			thePotentialEarlyData = bs
 			return "", true
 		}
@@ -228,11 +239,13 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 
 	_, err := theUpgrader.Upgrade(rw)
 	if err != nil {
-		if len(theWrongPath) > 0 {
-			//ws的Method必为Get, 否则 gobwas 会返回 ErrHandshakeBadMethod
-			return nil, &httpLayer.RequestErr{Path: theWrongPath}
-		}
-		return nil, err
+
+		return httpLayer.FallbackMeta{
+			Conn:         underlay,
+			H1RequestBuf: optionalFirstBuffer,
+			Path:         rp.Path,
+			Method:       rp.Method,
+		}, httpLayer.ErrShouldFallback
 	}
 
 	theConn := &Conn{

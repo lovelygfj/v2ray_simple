@@ -39,7 +39,7 @@ var (
 
 	tproxyList []*tproxy.Machine //储存所有 tproxy的监听.(一般就一个, 但不排除极特殊情况)
 
-	listenerArray []io.Closer //储存除tproxy之外 所有运行的 inServer 的 Listener
+	listenCloserList []io.Closer //储存除tproxy之外 所有运行的 inServer 的 Listener 的 Closer
 
 	defaultOutClient proxy.Client
 
@@ -48,17 +48,16 @@ var (
 
 const (
 	defaultLogFile = "vs_log"
+	defaultConfFn  = "client.toml"
+	defaultGeoipFn = "GeoLite2-Country.mmdb"
+
+	willExitStr = "Neither valid proxy settings available, nor cli or apiServer running. Exit now.\n"
 )
 
-func initRouteEnv() {
+func init() {
 	routingEnv.ClientsTagMap = make(map[string]proxy.Client)
 
-}
-
-func init() {
-	initRouteEnv()
-
-	flag.StringVar(&configFileName, "c", "client.toml", "config file name")
+	flag.StringVar(&configFileName, "c", defaultConfFn, "config file name")
 	flag.BoolVar(&startPProf, "pp", false, "pprof")
 	flag.BoolVar(&startMProf, "mp", false, "memory pprof")
 	//flag.IntVar(&jsonMode, "jm", 0, "json mode, 0:verysimple mode; 1: v2ray mode(not implemented yet)")
@@ -74,23 +73,34 @@ func init() {
 
 	flag.BoolVar(&netLayer.UseReadv, "readv", netLayer.DefaultReadvOption, "toggle the use of 'readv' syscall")
 
-	flag.StringVar(&netLayer.GeoipFileName, "geoip", "GeoLite2-Country.mmdb", "geoip maxmind file name")
+	flag.StringVar(&netLayer.GeoipFileName, "geoip", defaultGeoipFn, "geoip maxmind file name")
 
 }
 
+//我们 在程序关闭时, 主动Close, Stop
 func cleanup() {
-	//在程序ctrl+C关闭时, 会主动Close所有的监听端口. 主要是被报告windows有时退出程序之后, 端口还是处于占用状态.
-	// 用下面代码以试图解决端口占用问题.
 
-	for _, listener := range listenerArray {
+	for _, ser := range allServers {
+		if ser != nil {
+			ser.Stop()
+		}
+	}
+
+	for _, listener := range listenCloserList {
 		if listener != nil {
 			listener.Close()
 		}
 	}
 
-	for _, tm := range tproxyList {
-		tm.Stop()
+	if len(tproxyList) > 0 {
+		log.Println("closing tproxies")
+		for _, tm := range tproxyList {
+			if tm != nil {
+				tm.Stop()
+			}
+		}
 	}
+
 }
 
 func main() {
@@ -100,20 +110,21 @@ func main() {
 func mainFunc() (result int) {
 	defer func() {
 		if r := recover(); r != nil {
-			if ce := utils.CanLogFatal("Captured panic!"); ce != nil {
+			if ce := utils.CanLogErr("Captured panic!"); ce != nil {
 
 				stack := debug.Stack()
 
 				stackStr := string(stack)
 
-				log.Println(stackStr)
-
 				ce.Write(
 					zap.Any("err:", r),
 					zap.String("stacktrace", stackStr),
 				)
+
+				log.Println(stackStr) //因为 zap 使用json存储值，所以stack这种多行字符串里的换行符和tab 都被转译了，导致可读性比较差，所以还是要 log单独打印出来，可增强命令行的可读性
+
 			} else {
-				log.Fatalln("panic captured!", r, "\n", string(debug.Stack()))
+				log.Println("panic captured!", r, "\n", string(debug.Stack()))
 			}
 
 			result = -3
@@ -132,10 +143,21 @@ func mainFunc() (result int) {
 	}
 
 	if startPProf {
-		f, _ := os.OpenFile("cpu.pprof", os.O_CREATE|os.O_RDWR, 0644)
-		defer f.Close()
-		pprof.StartCPUProfile(f)
-		defer pprof.StopCPUProfile()
+		const pprofFN = "cpu.pprof"
+		f, err := os.OpenFile(pprofFN, os.O_CREATE|os.O_RDWR, 0644)
+
+		if err == nil {
+			defer f.Close()
+			err = pprof.StartCPUProfile(f)
+			if err == nil {
+				defer pprof.StopCPUProfile()
+			} else {
+				log.Println("pprof.StartCPUProfile failed", err)
+
+			}
+		} else {
+			log.Println(pprofFN, "can't be created,", err)
+		}
 
 	}
 	if startMProf {
@@ -149,6 +171,19 @@ func mainFunc() (result int) {
 	var mainFallback *httpLayer.ClassicFallback
 
 	var loadConfigErr error
+
+	fpath := utils.GetFilePath(configFileName)
+	if !utils.FileExist(fpath) {
+
+		if utils.GivenFlags["c"] == nil {
+			log.Printf("No -c provided and default %q doesn't exist", defaultConfFn)
+		} else {
+			log.Printf("-c provided but %q doesn't exist", configFileName)
+		}
+
+		configFileName = ""
+
+	}
 
 	standardConf, simpleConf, mode, mainFallback, loadConfigErr = proxy.LoadConfig(configFileName, listenURL, dialURL, 0)
 
@@ -194,13 +229,23 @@ func mainFunc() (result int) {
 			ce.Write(zap.String("dir", wdir))
 		}
 	}
+	if ce := utils.CanLogDebug("All Given Flags"); ce != nil {
+		ce.Write(zap.Any("flags", utils.GivenFlagKVs()))
+	}
 
 	if loadConfigErr != nil && !isFlexible() {
-		log.Printf("no config exist, and no api server or interactive cli enabled, exiting...")
+
+		if ce := utils.CanLogErr(willExitStr); ce != nil {
+			ce.Write(zap.Error(loadConfigErr))
+		} else {
+			log.Print(willExitStr)
+
+		}
+
 		return -1
 	}
 
-	netLayer.Prepare()
+	//netLayer.PrepareInterfaces()	//发现有时, ipv6不是程序刚运行时就有的, 所以不应默认 预读网卡。主要是 openwrt等设备 在使用 DHCPv6 获取ipv6 等情况时。
 
 	fmt.Printf("Log Level:%d\n", utils.LogLevel)
 
@@ -209,17 +254,13 @@ func mainFunc() (result int) {
 		ce.Write(
 			zap.String("Log Level", utils.LogLevelStr(utils.LogLevel)),
 			zap.Bool("UseReadv", netLayer.UseReadv),
-			zap.Bool("tls_lazy_encrypt", vs.Tls_lazy_encrypt),
 		)
 
 	} else {
 
 		fmt.Printf("UseReadv:%t\n", netLayer.UseReadv)
-		fmt.Printf("tls_lazy_encrypt:%t\n", vs.Tls_lazy_encrypt)
 
 	}
-
-	runPreCommands()
 
 	var defaultInServer proxy.Server
 	var Default_uuid string
@@ -233,32 +274,15 @@ func mainFunc() (result int) {
 	//load inServers and RoutingEnv
 	switch mode {
 	case proxy.SimpleMode:
-		var hase bool
-		var eie utils.ErrInErr
-		defaultInServer, hase, eie = proxy.ServerFromURL(simpleConf.Server_ThatListenPort_Url)
-		if hase {
-			if ce := utils.CanLogErr("can not create local server"); ce != nil {
-				ce.Write(zap.Error(eie))
-			}
-			return -1
-		}
-
-		if !defaultInServer.CantRoute() && simpleConf.Route != nil {
-
-			netLayer.LoadMaxmindGeoipFile("")
-
-			//极简模式只支持通过 mycountry进行 geoip分流 这一种情况
-			routingEnv.RoutePolicy = netLayer.NewRoutePolicy()
-			if simpleConf.MyCountryISO_3166 != "" {
-				routingEnv.RoutePolicy.AddRouteSet(netLayer.NewRouteSetForMyCountry(simpleConf.MyCountryISO_3166))
-
-			}
+		result, defaultInServer = loadSimpleServer()
+		if result < 0 {
+			return result
 		}
 	case proxy.StandardMode:
 
-		routingEnv, Default_uuid = proxy.LoadEnvFromStandardConf(&standardConf)
-
-		initRouteEnv()
+		if appConf := standardConf.App; appConf != nil {
+			Default_uuid = appConf.DefaultUUID
+		}
 
 		//虽然标准模式支持多个Server，目前先只考虑一个
 		//多个Server存在的话，则必须要用 tag指定路由; 然后，我们需在预先阶段就判断好tag指定的路由
@@ -289,117 +313,139 @@ func mainFunc() (result int) {
 			}
 
 			allServers = append(allServers, thisServer)
-			//if tag := thisServer.GetTag(); tag != "" {
-			//	vs.ServersTagMap[tag] = thisServer
-			//}
 		}
+
+		//将@前缀的 回落dest配置 替换成 实际的 地址。
+
+		if len(standardConf.Fallbacks) > 0 {
+			for _, fbConf := range standardConf.Fallbacks {
+				if fbConf.Dest == nil {
+					continue
+				}
+				if deststr, ok := fbConf.Dest.(string); ok && strings.HasPrefix(deststr, "@") {
+					for _, s := range allServers {
+						if s.GetTag() == deststr[1:] {
+							log.Println("got tag fallback dest, will set to ", s.AddrStr())
+							fbConf.Dest = s.AddrStr()
+						}
+					}
+
+				}
+
+			}
+		}
+
+		routingEnv = proxy.LoadEnvFromStandardConf(&standardConf)
 
 	}
 
 	// load outClients
 	switch mode {
 	case proxy.SimpleMode:
-		var hase bool
-		var eie utils.ErrInErr
-		defaultOutClient, hase, eie = proxy.ClientFromURL(simpleConf.Client_ThatDialRemote_Url)
-		if hase {
-			if ce := utils.CanLogErr("can not create remote client"); ce != nil {
-				ce.Write(zap.Error(eie))
-			}
-			return -1
+		result, defaultOutClient = loadSimpleClient()
+		if result < 0 {
+			return result
 		}
 	case proxy.StandardMode:
 
 		if len(standardConf.Dial) < 1 {
-			utils.Warn("no dial in config settings")
+			utils.Warn("no dial in config settings, will add 'direct'")
+
+			allClients = append(allClients, vs.DirectClient)
+			defaultOutClient = vs.DirectClient
+
+			routingEnv.SetClient("direct", vs.DirectClient)
+
 			break
 		}
 
-		for _, thisConf := range standardConf.Dial {
-			if thisConf.Uuid == "" && Default_uuid != "" {
-				thisConf.Uuid = Default_uuid
-			}
-
-			thisClient, err := proxy.NewClient(thisConf)
-			if err != nil {
-				if ce := utils.CanLogErr("can not create remote client: "); ce != nil {
-					ce.Write(zap.Error(err))
-				}
-				continue
-			}
-			allClients = append(allClients, thisClient)
-
-			if tag := thisClient.GetTag(); tag != "" {
-				routingEnv.ClientsTagMap[tag] = thisClient
-			}
-		}
-
-		if len(allClients) > 0 {
-			defaultOutClient = allClients[0]
-
-		} else {
-			defaultOutClient = vs.DirectClient
-		}
+		hotLoadDialConfForRuntime(Default_uuid, standardConf.Dial)
 
 	}
 
-	configFileQualifiedToRun := false
+	runPreCommands()
 
 	if (defaultOutClient != nil) && (defaultInServer != nil || len(allServers) > 0 || len(tproxyConfs) > 0) {
-		configFileQualifiedToRun = true
 
 		if mode == proxy.SimpleMode {
 			lis := vs.ListenSer(defaultInServer, defaultOutClient, &routingEnv)
 			if lis != nil {
-				listenerArray = append(listenerArray, lis)
+				listenCloserList = append(listenCloserList, lis)
 			}
 		} else {
 			for _, inServer := range allServers {
 				lis := vs.ListenSer(inServer, defaultOutClient, &routingEnv)
 
 				if lis != nil {
-					listenerArray = append(listenerArray, lis)
+					listenCloserList = append(listenCloserList, lis)
 				}
 			}
 
 			if len(tproxyConfs) > 0 {
+
+				if len(tproxyConfs) == 1 {
+					conf := tproxyConfs[0]
+					if thing := conf.Extra["auto_iptables"]; thing != nil {
+						if auto, ok := thing.(bool); ok && auto {
+							tproxy.SetIPTablesByPort(conf.Port)
+
+							defer func() {
+								tproxy.CleanupIPTables()
+							}()
+						}
+					}
+
+				}
+
 				for _, thisConf := range tproxyConfs {
-					tm := vs.ListenTproxy(thisConf.GetAddrStrForListenOrDial(), defaultOutClient, routingEnv.RoutePolicy)
+					enableSniff := false
+					if thisConf.SniffConf != nil {
+						enableSniff = thisConf.SniffConf.Enable
+					}
+					lc := proxy.LesserConf{
+						Addr:        thisConf.GetAddrStrForListenOrDial(),
+						Tag:         thisConf.Tag,
+						UseSniffing: enableSniff,
+						Fullcone:    thisConf.Fullcone,
+					}
+					tm := vs.ListenTproxy(lc, defaultOutClient, routingEnv.RoutePolicy)
 					if tm != nil {
 						tproxyList = append(tproxyList, tm)
 					}
 
 				}
 
-				//如果在非linux系统 上，仅设置了tproxy，则会遇到下面情况
-				if len(tproxyList) == 0 {
-					if !(defaultInServer != nil || len(allServers) > 0) {
-						configFileQualifiedToRun = false
-					}
-				}
-			}
+			} //if len(tproxyConfs) > 0 {
 
-		}
+		} //if mode == proxy.SimpleMode {
 
-	}
+	} //if (defaultOutClient != nil) && (defaultInServer != nil || len(allServers) > 0 || len(tproxyConfs) > 0) {
+
 	//没可用的listen/dial，而且还无法动态更改配置
-	if !configFileQualifiedToRun && !isFlexible() {
-		utils.Error("No valid proxy settings available, nor cli or apiServer feature enabled, exit now.")
+	if noFuture() {
+		utils.Error(willExitStr)
 		return -1
 	}
 
 	if enableApiServer {
-		go checkConfigAndTryRunApiServer()
+		tryRunApiServer()
 
 	}
 
 	if interactive_mode {
 		runCli()
+
+		interactive_mode = false
+	}
+
+	if nothingRunning() {
+		utils.Warn(willExitStr)
+		return
 	}
 
 	{
 		osSignals := make(chan os.Signal, 1)
-		signal.Notify(osSignals, os.Interrupt, os.Kill, syscall.SIGTERM)
+		signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM) //os.Kill cannot be trapped
 		<-osSignals
 
 		utils.Info("Program got close signal.")
@@ -407,4 +453,21 @@ func mainFunc() (result int) {
 		cleanup()
 	}
 	return
+}
+
+func hasProxyRunning() bool {
+	return len(listenCloserList) > 0 || len(tproxyList) > 0
+}
+
+//是否可以在运行时动态修改配置。如果没有开启 apiServer 开关 也没有 动态修改配置的功能，则当前模式不灵活，无法动态修改
+func isFlexible() bool {
+	return interactive_mode || enableApiServer
+}
+
+func noFuture() bool {
+	return !hasProxyRunning() && !isFlexible()
+}
+
+func nothingRunning() bool {
+	return !hasProxyRunning() && !(interactive_mode || apiServerRunning)
 }

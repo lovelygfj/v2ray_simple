@@ -1,16 +1,21 @@
 [app]
 loglevel = 1
-default_uuid = "a684455c-b14f-11ea-bf0d-42010aaa0003"
+default_uuid = "a684455c-b14f-11ea-bf0d-42010aaa0003"   # 这个除了作为默认用户以外, 还可用作 "管理员账户"这种用途。
+# 每个listen 可以只配置users来配置用户列表，然后 这个default_uuid 会作为 每个listen 的uuid 的值。
+# 这样作为管理员，每个listen自己都能用自己的 账户连上，不必再额外对每一个listen 添加一遍 自己的账户。
 
 [[listen]]
 tag = "my_vlesss1"
 protocol = "vlesss"
 host = "0.0.0.0"
+version = -1    # 支持所有vless版本
 port = 4433
 insecure = true
 fallback = ":80"    #默认回落。当[[fallback]]给出的回落都无法匹配后，使用该值进行回落。
 cert = "cert.pem"
 key = "cert.key"
+users = [ {user = "a684455c-b14f-11ea-bf0d-42010aaa0004"} , {user = "a684455c-b14f-11ea-bf0d-42010aaa0005"} ]
+
 
 [[listen]]
 tag = "my_ws1"
@@ -36,13 +41,14 @@ key = "cert.key"
 advancedLayer = "grpc"
 path = "ohmygod_verysimple_is_very_simple"
 
+#最简单情况下，服务端 不需要给出任何dial，不给出的话实际上程序就会自动加一个 direct。
 
-[[dial]]
-protocol = "direct"
+#[[dial]]
+#protocol = "direct"
 
 
 [[fallback]]
-from = "my_ws1" # 可选， 标明该fallback用于 哪个tag的 listen。 如果未给出，则所有listen都会用到该fallback。
+from = ["my_ws1"] # 可选， 标明该fallback用于 哪个tag的 listen。 如果未给出，则所有listen都会用到该fallback。
 
 dest = 6060     # 必填，回落到本机端口 6060
 
@@ -51,8 +57,22 @@ alpn = ["http/1.1"] # 可选，按 alpn 匹配此 回落
 
 
 
-# 比如此fallback就是所有 listen 共用的一个 fallback
+# 比如下面这个 fallback 就是所有 listen 共用的一个 fallback
 [[fallback]]
 path = "/ohmygod_i_love_verysimple" 
 dest = 8080
 alpn = ["http/1.1"]
+#xver = 1 
+
+[[dial]]
+tag = "mydirect"
+protocol = "direct"
+
+[[dial]]
+tag = "my_special_tag_for_this_guy"
+protocol = "reject"
+
+
+[[route]]
+toTag = "my_special_tag_for_this_guy"
+user = ["a684455c-b14f-11ea-bf0d-42010aaa0004"] #通过 listen 所得到 的 user的不同 来分流

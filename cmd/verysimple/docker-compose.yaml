@@ -1,0 +1,11 @@
+version: "3.3"
+services:
+  verysimple:
+    container_name: verysimple
+    restart: always
+    network_mode: "host"
+    volumes:
+      - "/etc/verysimple:/etc/verysimple"
+      - "/etc/domain-list-community:/bin/geosite"
+    command: -c /etc/verysimple/server.toml
+    image: ghcr.io/e1732a364fed/v2ray_simple:latest

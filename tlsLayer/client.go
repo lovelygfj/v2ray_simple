@@ -20,7 +20,7 @@ type Client struct {
 	alpnList   []string
 }
 
-func NewClient(host string, insecure bool, use_uTls bool, alpnList []string) *Client {
+func NewClient(host string, insecure bool, use_uTls bool, alpnList []string, certConf *CertConf, minver uint16) *Client {
 
 	c := &Client{
 		use_uTls: use_uTls,
@@ -29,21 +29,15 @@ func NewClient(host string, insecure bool, use_uTls bool, alpnList []string) *Cl
 	c.alpnList = alpnList
 
 	if use_uTls {
-		c.uTlsConfig = utls.Config{
-			InsecureSkipVerify: insecure,
-			ServerName:         host,
-			NextProtos:         alpnList,
-		}
 
-		if ce := utils.CanLogInfo("using utls and Chrome fingerprint for"); ce != nil {
+		c.uTlsConfig = GetUTlsConfig(insecure, alpnList, host, certConf, minver)
+
+		if ce := utils.CanLogInfo("using uTls and Chrome fingerprint for"); ce != nil {
 			ce.Write(zap.String("host", host))
 		}
 	} else {
-		c.tlsConfig = &tls.Config{
-			InsecureSkipVerify: insecure,
-			ServerName:         host,
-			NextProtos:         alpnList,
-		}
+
+		c.tlsConfig = GetTlsConfig(insecure, false, alpnList, host, certConf, minver)
 
 	}
 

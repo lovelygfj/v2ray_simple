@@ -6,8 +6,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
@@ -22,36 +20,54 @@ func init() {
 
 type ServerCreator struct{}
 
+//如果 lc.Version==0, 则只支持 v0.
 func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 	uuidStr := lc.Uuid
-	id, err := proxy.NewV2rayUser(uuidStr)
-	if err != nil {
-		return nil, err
-	}
-	s := &Server{
-		userHashes: make(map[[16]byte]bool),
+	onlyV0 := lc.Version == 0
+
+	var s *Server
+
+	if uuidStr != "" {
+		var err error
+		s, err = newServerWithConf(uuidStr, onlyV0)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		s = newServer(onlyV0)
 	}
 
-	s.addV2User(&id)
-
+	if len(lc.Users) > 0 {
+		us := utils.InitV2rayUsers(lc.Users)
+		s.LoadUsers(us)
+	}
 	return s, nil
+
 }
 
-func (ServerCreator) NewServerFromURL(u *url.URL) (proxy.Server, error) {
-	return NewServer(u)
-}
-func NewServer(url *url.URL) (proxy.Server, error) {
-
+//如果 v=0, 则只支持 v0.
+func (ServerCreator) NewServerFromURL(url *url.URL) (proxy.Server, error) {
 	uuidStr := url.User.Username()
-	id, err := proxy.NewV2rayUser(uuidStr)
+	return newServerWithConf(uuidStr, url.Query().Get("v") == "0")
+}
+
+func newServer(onlyV0 bool) *Server {
+	s := &Server{
+		MultiUserMap: utils.NewMultiUserMap(),
+		onlyV0:       onlyV0,
+	}
+	s.SetUseUUIDStr_asKey()
+	return s
+}
+
+func newServerWithConf(uuid string, onlyV0 bool) (*Server, error) {
+	v2rayUser, err := utils.NewV2rayUser(uuid)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{
-		userHashes: make(map[[16]byte]bool),
-	}
+	s := newServer(onlyV0)
 
-	s.addV2User(&id)
+	s.AddUser(v2rayUser)
 
 	return s, nil
 }
@@ -59,87 +75,36 @@ func NewServer(url *url.URL) (proxy.Server, error) {
 //Server 同时支持vless v0 和 v1
 //实现 proxy.UserServer 以及 tlsLayer.UserHaser
 type Server struct {
-	proxy.ProxyCommonStruct
-	userHashes map[[16]byte]bool
-	mux4Hashes sync.RWMutex
+	proxy.Base
+
+	*utils.MultiUserMap
+
+	onlyV0 bool
 }
 
-func (*Server) HasInnerMux() (int, string) {
-	return 1, "simplesocks"
+func (s *Server) HasInnerMux() (int, string) {
+	if s.onlyV0 {
+		return 0, ""
+
+	} else {
+		return 1, "simplesocks"
+	}
 }
+
 func (*Server) CanFallback() bool {
 	return true
-}
-func (s *Server) addV2User(u *proxy.V2rayUser) {
-	s.userHashes[*u] = true
-}
-
-func (s *Server) AddV2User(u *proxy.V2rayUser) {
-
-	s.mux4Hashes.Lock()
-	s.userHashes[*u] = true
-	s.mux4Hashes.Unlock()
-}
-
-func (s *Server) DelV2User(u *proxy.V2rayUser) {
-
-	s.mux4Hashes.RLock()
-
-	hasu := s.userHashes[*u]
-	if hasu {
-		s.mux4Hashes.RUnlock()
-		return
-	}
-
-	s.mux4Hashes.Lock()
-	delete(s.userHashes, *u)
-	s.mux4Hashes.Unlock()
-
-}
-
-func (s *Server) GetUserByBytes(bs []byte) proxy.User {
-	if len(bs) < 16 {
-		return nil
-	}
-	thisUUIDBytes := *(*[16]byte)(unsafe.Pointer(&bs[0]))
-	if s.userHashes[thisUUIDBytes] {
-		return proxy.V2rayUser(thisUUIDBytes)
-	}
-	return nil
-}
-
-func (s *Server) HasUserByBytes(bs []byte) bool {
-	if len(bs) < 16 {
-		return false
-	}
-	if s.userHashes[*(*[16]byte)(unsafe.Pointer(&bs[0]))] {
-		return true
-	}
-	return false
-}
-
-func (s *Server) UserBytesLen() int {
-	return 16
-}
-
-func (s *Server) GetUserByStr(str string) proxy.User {
-	u, e := utils.StrToUUID(str)
-	if e != nil {
-		return nil
-	}
-	return s.GetUserByBytes(u[:])
 }
 
 func (s *Server) Name() string { return Name }
 
 // 返回的bytes.Buffer 是用于 回落使用的，内含了整个读取的数据;不回落时不要使用该Buffer
-func (s *Server) Handshake(underlay net.Conn) (result net.Conn, msgConn netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
+func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
 
-	if err := underlay.SetReadDeadline(time.Now().Add(time.Second * 4)); err != nil {
+	if err := proxy.SetCommonReadTimeout(underlay); err != nil {
 		returnErr = err
 		return
 	}
-	defer underlay.SetReadDeadline(time.Time{})
+	defer netLayer.PersistConn(underlay)
 
 	//这里我们本 不用再创建一个buffer来缓存数据，因为tls包本身就是有缓存的，所以一点一点读就行，tcp本身系统也是有缓存的
 	// 因此v1.0.3以及更老版本都是直接一段一段read的。
@@ -191,15 +156,11 @@ realPart:
 
 	idBytes := auth[1:17]
 
-	s.mux4Hashes.RLock()
-
 	thisUUIDBytes := *(*[16]byte)(unsafe.Pointer(&idBytes[0]))
 
-	if s.userHashes[thisUUIDBytes] {
-		s.mux4Hashes.RUnlock()
+	if s.AuthUserByBytes(thisUUIDBytes[:]) != nil {
 	} else {
-		s.mux4Hashes.RUnlock()
-		returnErr = utils.ErrInErr{ErrDesc: "invalid user ", ErrDetail: utils.ErrInvalidData, Data: utils.UUIDToStr(thisUUIDBytes)}
+		returnErr = utils.ErrInErr{ErrDesc: "invalid user ", ErrDetail: utils.ErrInvalidData, Data: utils.UUIDToStr(thisUUIDBytes[:])}
 		goto errorPart
 	}
 
@@ -264,7 +225,7 @@ realPart:
 
 	case CmdTCP, CmdUDP:
 
-		targetAddr, err = GetAddrFrom(readbuf)
+		targetAddr, err = netLayer.V2rayGetAddrFrom(readbuf)
 		if err != nil {
 
 			returnErr = utils.ErrInErr{ErrDesc: "fallback, reason 4", ErrDetail: err}
@@ -300,20 +261,22 @@ realPart:
 	if isudp {
 		return nil, &UDPConn{
 			Conn:              underlay,
+			V2rayUser:         thisUUIDBytes,
 			version:           int(version),
-			raddr:             targetAddr,
 			optionalReader:    io.MultiReader(readbuf, underlay),
+			raddr:             targetAddr,
 			remainFirstBufLen: readbuf.Len(),
 			udp_multi:         use_udp_multi,
+			fullcone:          s.IsFullcone,
 		}, targetAddr, nil
 
 	} else {
 		uc := &UserTCPConn{
 			Conn:              underlay,
+			V2rayUser:         thisUUIDBytes,
 			version:           int(version),
 			optionalReader:    io.MultiReader(readbuf, underlay),
 			remainFirstBufLen: readbuf.Len(),
-			uuid:              thisUUIDBytes,
 			underlayIsBasic:   netLayer.IsBasicConn(underlay),
 			isServerEnd:       true,
 		}

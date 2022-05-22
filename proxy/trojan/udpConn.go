@@ -12,16 +12,20 @@ import (
 
 type UDPConn struct {
 	net.Conn
+	User
 	optionalReader io.Reader
 
 	bufr *bufio.Reader
 
 	handshakeBuf *bytes.Buffer
+
+	isfullcone bool
 }
 
-func NewUDPConn(conn net.Conn, optionalReader io.Reader) (uc *UDPConn) {
+func NewUDPConn(conn net.Conn, optionalReader io.Reader, fullcone bool) (uc *UDPConn) {
 	uc = new(UDPConn)
 	uc.Conn = conn
+	uc.isfullcone = fullcone
 	if optionalReader != nil {
 		uc.optionalReader = optionalReader
 		uc.bufr = bufio.NewReader(optionalReader)
@@ -31,13 +35,13 @@ func NewUDPConn(conn net.Conn, optionalReader io.Reader) (uc *UDPConn) {
 	return
 }
 
-func (u UDPConn) Fullcone() bool {
-	return true
+func (u *UDPConn) Fullcone() bool {
+	return u.isfullcone
 }
-func (u UDPConn) CloseConnWithRaddr(raddr netLayer.Addr) error {
+func (u *UDPConn) CloseConnWithRaddr(raddr netLayer.Addr) error {
 	return u.Close()
 }
-func (u UDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
+func (u *UDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
 
 	addr, err := GetAddrFrom(u.bufr, false)
 	if err != nil {

@@ -19,6 +19,7 @@ type ClientUDPConn struct {
 	ServerUDPPort_forMe int          //socks5服务会为每一个socks5客户端留一个专用的udp端口
 
 	WriteUDP_Target *net.UDPAddr
+	fullcone        bool
 }
 
 func (cpc *ClientUDPConn) Associate() (err error) {
@@ -144,7 +145,7 @@ func (cpc *ClientUDPConn) CloseConnWithRaddr(raddr netLayer.Addr) error {
 }
 
 func (cpc *ClientUDPConn) Fullcone() bool {
-	return true
+	return cpc.fullcone
 }
 
 //传入 conn必须非nil，否则panic
@@ -170,7 +171,7 @@ func Client_EstablishUDPAssociate(conn net.Conn) (port int, err error) {
 		return
 	}
 	if n != 2 || ba[0] != Version5 || ba[1] != 0 {
-		return 0, utils.NumErr{Prefix: "EstablishUDPAssociate,protocol err", N: 1}
+		return 0, utils.NumStrErr{Prefix: "EstablishUDPAssociate,protocol err", N: 1}
 	}
 
 	//请求udp associate 阶段
@@ -199,7 +200,7 @@ func Client_EstablishUDPAssociate(conn net.Conn) (port int, err error) {
 		return
 	}
 	if n != 10 || ba[0] != Version5 || ba[1] != 0 || ba[2] != 0 || ba[3] != 1 || ba[4] != 0 || ba[5] != 0 || ba[6] != 0 || ba[7] != 0 {
-		return 0, utils.NumErr{Prefix: "EstablishUDPAssociate,protocol err", N: 2}
+		return 0, utils.NumStrErr{Prefix: "EstablishUDPAssociate,protocol err", N: 2}
 	}
 
 	port = int(ba[8])<<8 | int(ba[9])
@@ -284,7 +285,7 @@ func Client_ReadUDPResponse(udpConn *net.UDPConn, supposedServerAddr *net.UDPAdd
 	}
 
 	if buf[0] != 0 || buf[1] != 0 || buf[2] != 0 {
-		e = utils.NumErr{Prefix: "EstablishUDPAssociate,protocol err", N: 1}
+		e = utils.NumStrErr{Prefix: "EstablishUDPAssociate,protocol err", N: 1}
 		return
 	}
 	atype := buf[3]
@@ -307,7 +308,7 @@ func Client_ReadUDPResponse(udpConn *net.UDPConn, supposedServerAddr *net.UDPAdd
 		target.Name = string(nameBuf)
 
 	default:
-		e = utils.NumErr{Prefix: "EstablishUDPAssociate,protocol err", N: 2}
+		e = utils.NumStrErr{Prefix: "EstablishUDPAssociate,protocol err", N: 2}
 		return
 	}
 

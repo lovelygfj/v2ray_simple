@@ -1,11 +1,13 @@
-/*Package advLayer contains subpackages for Advanced Layer in VSI model.
+/*Package advLayer contains definitions and subpackages for Advanced Layer in VSI model.
 
- */
+An advanced layer is based on http layer. It can be websocket, http2, grpc, quic or other customized protocols that based on http and can relay arbitrary length raw []byte data.
+
+If a protocol is not based on http layer, then maybe it should be on Proxy Layer, rather than Advanced Layer.
+*/
 package advLayer
 
 import (
 	"crypto/tls"
-	"fmt"
 	"io"
 	"net"
 
@@ -21,10 +23,10 @@ var ProtocolsMap = make(map[string]Creator)
 var MaxEarlyDataLen = 2048 //for ws early data
 
 func PrintAllProtocolNames() {
-	fmt.Printf("===============================\nSupported Advanced Layer protocols:\n")
+	utils.PrintStr("===============================\nSupported Advanced Layer protocols:\n")
 	for _, v := range utils.GetMapSortedKeySlice(ProtocolsMap) {
-		fmt.Print(v)
-		fmt.Print("\n")
+		utils.PrintStr(v)
+		utils.PrintStr("\n")
 	}
 }
 
@@ -55,6 +57,7 @@ type Conf struct {
 	Path    string
 	Headers *httpLayer.HeaderPreset
 	IsEarly bool           //is 0-rtt or not; for quic and ws.
+	Xver    int            //for Super, like quic, PROXY protocol
 	Extra   map[string]any //quic: useHysteria, hysteria_manual, maxbyte; grpc: multiMode
 }
 

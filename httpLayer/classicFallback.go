@@ -26,7 +26,6 @@ func NewClassicFallback() *ClassicFallback {
 	cf.Map[""] = make(map[FallbackConditionSet]*FallbackResult)
 
 	return cf
-	// make(map[FallbackConditionSet]*FallbackResult)
 }
 
 func NewClassicFallbackFromConfList(fcl []*FallbackConf) *ClassicFallback {
@@ -44,7 +43,7 @@ func NewClassicFallbackFromConfList(fcl []*FallbackConf) *ClassicFallback {
 		var aMask byte
 		if len(fc.Alpn) > 2 {
 			//理论上alpn可以为任意值，但是由于我们要回落，搞那么多奇葩的alpn只会增加被审查的概率
-			// 所以这里在代码端直接就禁止这种做法就ok了
+			// 所以这里在代码里直接就禁止这种做法就ok了
 		} else {
 			for _, v := range fc.Alpn {
 				if v == H2_Str {
@@ -67,23 +66,33 @@ func NewClassicFallbackFromConfList(fcl []*FallbackConf) *ClassicFallback {
 	return cfb
 }
 
-func (cfb *ClassicFallback) InsertFallbackConditionSet(condition FallbackConditionSet, forServerTag string, addr netLayer.Addr, xver int) {
+func (cfb *ClassicFallback) InsertFallbackConditionSet(condition FallbackConditionSet, forServerTags []string, addr netLayer.Addr, xver int) {
 
 	ftype := condition.GetType()
 
-	if ftype == FallBack_default && forServerTag == "" {
+	if ftype == FallBack_default && len(forServerTags) == 0 {
 		cfb.Default = &FallbackResult{Addr: addr, Xver: xver}
 		return
 	}
 
 	cfb.supportedTypeMask |= ftype
 
-	realMap := cfb.Map[forServerTag]
-	if realMap == nil {
-		cfb.Map[forServerTag] = make(map[FallbackConditionSet]*FallbackResult)
-	}
+	if len(forServerTags) == 0 {
+		realMap := cfb.Map[""]
+		realMap[condition] = &FallbackResult{Addr: addr, Xver: xver}
 
-	realMap[condition] = &FallbackResult{Addr: addr, Xver: xver}
+	} else {
+		for _, forServerTag := range forServerTags {
+
+			realMap := cfb.Map[forServerTag]
+			if realMap == nil {
+				realMap = make(map[FallbackConditionSet]*FallbackResult)
+				cfb.Map[forServerTag] = realMap
+			}
+
+			realMap[condition] = &FallbackResult{Addr: addr, Xver: xver}
+		}
+	}
 
 }
 

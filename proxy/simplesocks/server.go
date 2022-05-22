@@ -5,7 +5,6 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/proxy"
@@ -30,20 +29,23 @@ func (ServerCreator) NewServerFromURL(u *url.URL) (proxy.Server, error) {
 
 //implements proxy.Server
 type Server struct {
-	proxy.ProxyCommonStruct
+	proxy.Base
 }
 
 func (*Server) Name() string {
 	return Name
 }
+func (*Server) CanFallback() bool {
+	return true //simplesocks理论上当然是支持回落的，但是一般它被用于 innerMux的内层协议，所以用做innerMux内层协议时，要注意不要再回落了。
+}
 
 //若握手步骤数据不对, 会返回 ErrDetail 为 utils.ErrInvalidData 的 utils.ErrInErr
 func (s *Server) Handshake(underlay net.Conn) (result net.Conn, msgConn netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
-	if err := underlay.SetReadDeadline(time.Now().Add(time.Second * 4)); err != nil {
+	if err := proxy.SetCommonReadTimeout(underlay); err != nil {
 		returnErr = err
 		return
 	}
-	defer underlay.SetReadDeadline(time.Time{})
+	defer netLayer.PersistConn(underlay)
 
 	readbs := utils.GetBytes(utils.MTU)
 
@@ -97,7 +99,9 @@ realPart:
 	}
 
 	if isudp {
-		return nil, NewUDPConn(underlay, io.MultiReader(readbuf, underlay)), targetAddr, nil
+		x := NewUDPConn(underlay, io.MultiReader(readbuf, underlay))
+		x.fullcone = s.IsFullcone
+		return nil, x, targetAddr, nil
 
 	} else {
 		return &TCPConn{

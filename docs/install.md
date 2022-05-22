@@ -1,5 +1,7 @@
 
-下面给出安装到 ubuntu amd64服务器 所需要的步骤和命令, 大家总结一下即可得到一个简单的一键脚本
+# 普通安装
+
+下面给出安装到 ubuntu/debian amd64服务器 所需要的步骤和命令, 大家总结一下即可得到一个简单的一键脚本
 
 本指导默认不使用root账户，且不建议用一键脚本。分步骤学习、安装 更加科学。
 
@@ -7,7 +9,7 @@
 
 下面的命令也不要整个一大段拷贝，而要分条拷贝到终端并运行。
 
-## 第〇步，准备
+## 第〇步，服务器准备
 
 首先确保自己服务器相应端口都是打开状态，防火墙要处理一下。然后安装一些BBR之类的加速组件。
 
@@ -15,7 +17,7 @@
 
 命令解释：先移除旧版本文件夹，然后从github下载最新版发布包，然后解压到相应位置后复制出一个配置文件。
 
-注意，本命令只会下载正式版，不会下载beta版。如果你要测试beta版，到github上找到对应的下载链接下载，而不是使用jq所读到的版本。
+注意，本命令只会下载正式版，不会下载 pre-release 版。如果你要测试 pre-release 版，到github上找到对应的下载链接下载，而不是使用jq所读到的版本。
 
 注意，如果你以前用过verysimple，则最好在运行前将自己配置文件先拷贝到其它地方，防止下面代码将你原来配置误删除。
 或你可以先解压 新版verysimple可执行文件 到其他位置，然后再用 mv 覆盖掉老版本 的可执行文件 和 examples 目录。
@@ -87,3 +89,44 @@ sudo systemctl enable verysimple
 sudo systemctl start verysimple
 ```
 
+# docker 安装
+
+查看 cmd/verysimple下 的 Dockerfile 和 docker-compose, 以及 
+
+https://github.com/e1732a364fed/v2ray_simple/pkgs/container/v2ray_simple
+
+主要贡献者： @qzydustin , @1Xgkr6wq
+
+## docker
+
+    docker pull ghcr.io/e1732a364fed/v2ray_simple:latest
+
+    docker run -d \
+    --name verysimple \
+    -e TZ="Asia/Shanghai" \
+    -v /dev/shm:/dev/shm \
+    -v /etc/verysimple/server.toml:/etc/verysimple/server.toml \
+    -v /etc/verysimple/examples:/etc/verysimple/examples \
+    -v /etc/verysimple/cert.pem:/etc/verysimple/cert.pem \
+    -v /etc/verysimple/cert.key:/etc/verysimple/cert.key \
+    --network host \
+    --restart always \
+    ghcr.io/e1732a364fed/v2ray_simple:latest
+
+这个 -v参数的话，冒号前为宿主机路径，冒号后为容器路径
+
+这里就是映射一些 需要的文件 和 文件夹，自己修改对应的 冒号左侧 的 自己文件夹的位置。
+
+（这个命令我没试过，如果有错误请指正）
+
+## docker-compose
+
+在含有 docker-compose.yaml 的目录下，运行 `docker-compose up -d` 来启动；运行 `docker-compose down` 来关闭。
+
+这个docker-compose 设计时，要求你 宿主机有一个 `/etc/verysimple` 文件夹，里面放 一个 `server.toml` 配置文件。 
+
+还要求你宿主机的 `/etc/domain-list-community` 文件夹 为 geosite 文件夹 （内有data文件夹，data文件夹内部有很多文件，文件格式等同于 v2fly/domain-list-community 项目中的 data文件夹 中的 文件 的格式）。
+
+如果你没有这个文件夹或者没有这个文件，则该 docker-compose 肯定运行不了。当然，你可以自行修改 该 `docker-compose.yaml` 文件
+
+（我没试过，如果有错误请指正）

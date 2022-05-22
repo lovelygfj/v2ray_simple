@@ -27,7 +27,8 @@ type Config struct {
 	ServiceName string
 	Host        string
 
-	FallbackToH1 bool //默认会回落到h2, 如果指定 FallbackToH1， 则会回落到 http/1.1
+	//FallbackToH1 bool //默认会回落到h2, 如果指定 FallbackToH1， 则会回落到 http/1.1
+	// 不过实际上用不到这一项，因为你只要回落到一个同时支持 h1和 h2的服务器不就ok了。
 }
 
 //implements net.Conn
@@ -46,17 +47,17 @@ type ClientConn struct {
 	err           error
 }
 
-func (g *ClientConn) handshake() {
-	response, err := g.transport.RoundTrip(g.request)
+func (c *ClientConn) handshake() {
+	response, err := c.transport.RoundTrip(c.request)
 	if err != nil {
-		g.err = err
-		g.writer.Close()
+		c.err = err
+		c.writer.Close()
 		return
 	}
 
 	notOK := false
 
-	if g.shouldClose.Load() {
+	if c.shouldClose.Load() {
 		notOK = true
 	} else {
 		//log.Println("response headers", response.Header)
@@ -67,8 +68,8 @@ func (g *ClientConn) handshake() {
 			}
 
 			notOK = true
-		} else if g.client != nil && len(g.client.responseHeader) > 0 {
-			if ok, firstNotMatchKey := httpLayer.AllHeadersIn(g.client.responseHeader, response.Header); !ok {
+		} else if c.client != nil && len(c.client.responseHeader) > 0 {
+			if ok, firstNotMatchKey := httpLayer.AllHeadersIn(c.client.responseHeader, response.Header); !ok {
 
 				if ce := utils.CanLogWarn("GRPC Client configured custom header, but the server response doesn't have all of them"); ce != nil {
 					ce.Write(zap.String("firstNotMatchKey", firstNotMatchKey))
@@ -82,63 +83,64 @@ func (g *ClientConn) handshake() {
 
 	if notOK {
 
-		g.client.cachedTransport = nil
+		c.client.cachedTransport = nil
 
 		response.Body.Close()
 	} else {
-		g.response = response
-		g.br = bufio.NewReader(response.Body)
+		c.response = response
+		c.br = bufio.NewReader(response.Body)
 	}
 }
 
-func (g *ClientConn) Read(b []byte) (n int, err error) {
+func (c *ClientConn) Read(b []byte) (n int, err error) {
 
-	g.handshakeOnce.Do(g.handshake)
+	c.handshakeOnce.Do(c.handshake)
 
-	if g.err != nil {
-		return 0, g.err
+	if c.err != nil {
+		return 0, c.err
 	}
 
-	if g.response == nil {
+	if c.response == nil {
 		return 0, net.ErrClosed
 	}
 
-	return g.commonPart.Read(b)
+	return c.commonPart.Read(b)
 
 }
 
-func (g *ClientConn) Write(b []byte) (n int, err error) {
+func (c *ClientConn) Write(b []byte) (n int, err error) {
 
 	buf := commonWrite(b)
-	_, err = g.writer.Write(buf.Bytes())
+	_, err = c.writer.Write(buf.Bytes())
 	utils.PutBuf(buf)
 
-	if err == io.ErrClosedPipe && g.err != nil {
-		err = g.err
+	if err == io.ErrClosedPipe && c.err != nil {
+		err = c.err
 	}
 	if err != nil {
-		g.client.dealErr(err)
+		c.client.dealErr(err)
 
 	}
 
 	return len(b), err
 }
 
-func (g *ClientConn) Close() error {
-	g.shouldClose.Store(true)
-	if r := g.response; r != nil {
+func (c *ClientConn) Close() error {
+	c.shouldClose.Store(true)
+	if r := c.response; r != nil {
 		r.Body.Close()
 	}
 
-	return g.writer.Close()
+	return c.writer.Close()
 }
 
+//implements advLayer.MuxClient
 type Client struct {
 	Creator
 
 	Config
 
-	curBaseConn net.Conn //一般为 tlsConn
+	//curBaseConn net.Conn //一般为 tlsConn
 
 	handshakeRequest http.Request
 
@@ -149,13 +151,13 @@ type Client struct {
 	path string
 }
 
-func (g *Client) dealErr(err error) {
+func (c *Client) dealErr(err error) {
 	//use of closed connection
 
 	if errors.Is(err, net.ErrClosed) {
-		g.cachedTransport = nil
+		c.cachedTransport = nil
 	} else if strings.Contains(err.Error(), "use of closed") {
-		g.cachedTransport = nil
+		c.cachedTransport = nil
 	}
 }
 
@@ -221,7 +223,7 @@ func (c *Client) DialSubConn(underlay any) (net.Conn, error) {
 		},
 	}
 
-	go conn.handshakeOnce.Do(conn.handshake) //necessary
+	go conn.handshakeOnce.Do(conn.handshake) //necessary。 因为 handshake不会立刻退出，所以必须要用 goroutine, 否则会卡住
 
 	return conn, nil
 }

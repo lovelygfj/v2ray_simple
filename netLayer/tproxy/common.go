@@ -1,5 +1,5 @@
 /*
-Package tproxy implements tproxy.
+Package tproxy listens tproxy and setup corresponding iptables for linux.
 
 透明代理只能用于linux。
 
@@ -34,8 +34,10 @@ https://github.com/FarFetchd/simple_tproxy_example/blob/master/tproxy_captive_po
 
 另外就是，偶然发现，trojan-go也是使用的 上面的示例的代码。
 
-同时，trojan-go还使用了
+同时，trojan-go还使用了.
 https://github.com/cybozu-go/transocks/blob/master/original_dst_linux.go
+
+不过实测我们不需要用这个代码来获取原始地址，因为地址我们直接就从 localAddr就能获取。也许是trojan-go的作者不懂tproxy的原理吧！
 
 Iptables
 
@@ -93,17 +95,25 @@ Persistent iptables
 
 	systemctl enable tproxyrule
 
+OffTopic
+
+透明代理与Redir的参考博客：
+
+http://ivo-wang.github.io/2018/02/24/ss-redir/
+
 */
 package tproxy
 
 import (
+	"log"
 	"net"
+	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 )
 
 //一个tproxy状态机 具有 监听端口、tcplistener、udpConn 这三个要素。
-// 目前仅用于关闭。
+// 用于关闭 以及 储存所监听的 端口。
 type Machine struct {
 	netLayer.Addr
 	net.Listener //tcpListener
@@ -112,10 +122,26 @@ type Machine struct {
 
 func (m *Machine) Stop() {
 	if m.Listener != nil {
-		m.Listener.Close()
+		log.Println("closing tproxy listener")
+		//后来发现，不知为何，这个 Close调用会卡住
+
+		ch := make(chan int)
+		go func() {
+			m.Listener.Close()
+			close(ch)
+		}()
+		tCh := time.After(time.Second)
+		select {
+		case <-tCh:
+			log.Println("close tproxy listener timeout")
+		case <-ch:
+			break
+		}
 
 	}
 	if m.UDPConn != nil {
+		log.Println("closing tproxy udp conn")
+
 		m.UDPConn.Close()
 
 	}

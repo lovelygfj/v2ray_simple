@@ -4,14 +4,11 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
 	"io/ioutil"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,18 +17,19 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-// geosite是v2fly社区维护的，非常有用！本作以及任何其它项目都没必要另起炉灶，
-// 直接使用v2fly所提供的资料即可。
-//
-//  然而需要注意的是，geosite是一个中国人维护的项目
-// 所有网站的资料都围绕着中国人的需求产生，比如 geolocation-cn 文件，没有同类的 geolocation-us 文件.
-//
-// geosite数据格式可参考
-// https://github.com/v2fly/v2ray-core/blob/master/app/router/routercommon/common.proto
-//
-// or xray的 app/router/config.proto
-// 然而我们不引用任何v2ray和xray的代码, 也不使用protobuf
 /*
+geosite是v2fly社区维护的，非常有用！本作以及任何其它项目都没必要另起炉灶，
+直接使用v2fly所提供的资料即可。
+
+然而需要注意的是，geosite是一个中国人维护的项目
+所有网站的资料都围绕着中国人的需求产生，比如 geolocation-cn 文件，没有同类的 geolocation-us 文件.
+
+geosite数据格式可参考
+https://github.com/v2fly/v2ray-core/blob/master/app/router/routercommon/common.proto
+
+or xray的 app/router/config.proto
+然而我们不引用任何v2ray和xray的代码, 也不使用protobuf
+
 我们只能自行读取该项目原始文件，然后生成自己的数据结构
 
 文件格式 项目已经解释的很好了，不过使用的英文
@@ -79,7 +77,15 @@ wget https://github.com/v2fly/domain-list-community/archive/refs/tags/$tag.tar.x
 
 */
 
-var GeositeListMap = make(map[string]*GeositeList)
+var (
+	GeositeListMap = make(map[string]*GeositeList)
+	geositeFolder  = "geosite/data"
+)
+
+func HasGeositeFolder() bool {
+	geositeFolder = utils.GetFilePath(geositeFolder)
+	return utils.DirExist(geositeFolder)
+}
 
 // v2fly经典匹配配置：
 //full:v2ray.com, domain:v2ray.com, domain意思是匹配子域名,
@@ -147,14 +153,13 @@ func (mdh MapGeositeDomainHaser) HasDomain(d string) bool {
 //
 //该 geosite/data 就是 github.com/v2fly/domain-list-community 项目的 data文件夹.
 func LoadGeositeFiles() (err error) {
-	dir := "geosite/data"
-	dir = utils.GetFilePath(dir)
-	if !utils.DirExist(dir) {
+
+	if !HasGeositeFolder() {
 		return os.ErrNotExist
 	}
 	ref := make(map[string]*GeositeRawList)
 
-	err = filepath.WalkDir(dir, func(path string, info fs.DirEntry, err error) error {
+	err = filepath.WalkDir(geositeFolder, func(path string, info fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -191,41 +196,15 @@ func LoadGeositeFiles() (err error) {
 // 该函数适用于系统中没有git的情况, 如果有git我们直接 git clone就行了,而且还能不断pull进行滚动更新
 func DownloadCommunity_DomainListFiles(proxyurl string) {
 
-	dir := "geosite/data"
-	dir = utils.GetFilePath(dir)
-	if utils.DirExist(dir) {
-		fmt.Println("geosite/data folder already exists.")
+	if HasGeositeFolder() {
+		utils.PrintStr("geosite/data folder already exists.\n")
 		return
 	}
 
-	var resp *http.Response
-	var err error
-
 	const requestUrl = "https://api.github.com/repos/v2fly/domain-list-community/releases/latest"
 
-	var thehttpClient = http.DefaultClient
+	thehttpClient, resp, err := utils.TryDownloadWithProxyUrl(proxyurl, requestUrl)
 
-	if proxyurl == "" {
-		resp, err = thehttpClient.Get(requestUrl)
-
-	} else {
-		url_proxy, e2 := url.Parse(proxyurl)
-		if e2 != nil {
-			fmt.Println("proxyurl given was wrong,", proxyurl, e2)
-			return
-		}
-
-		client := &http.Client{
-			Transport: &http.Transport{
-				Proxy:           http.ProxyURL(url_proxy),
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-
-		resp, err = client.Get(requestUrl)
-
-		thehttpClient = client
-	}
 	if err != nil {
 		fmt.Println("http get failed", err)
 		return
@@ -237,18 +216,17 @@ func DownloadCommunity_DomainListFiles(proxyurl string) {
 		return
 	}
 
-	type struct1 struct {
+	var tmpVar = struct {
 		Tag string `json:"tag_name"`
-	}
-	var s = struct1{}
-	json.Unmarshal(body, &s)
-	if s.Tag == "" {
+	}{}
+	json.Unmarshal(body, &tmpVar)
+	if tmpVar.Tag == "" {
 		return
 	}
 
 	const downloadStr = "https://github.com/v2fly/domain-list-community/archive/refs/tags/%s.tar.gz"
 
-	resp, err = thehttpClient.Get(fmt.Sprintf(downloadStr, s.Tag))
+	resp, err = thehttpClient.Get(fmt.Sprintf(downloadStr, tmpVar.Tag))
 	if err != nil {
 		fmt.Println("http get failed 2", err)
 		return
@@ -270,7 +248,7 @@ func DownloadCommunity_DomainListFiles(proxyurl string) {
 		return
 	}
 
-	fmt.Println("download and extract success!")
+	utils.PrintStr("download and extract success!\n")
 
 	err = os.Rename(folderName, "geosite")
 	if err != nil {

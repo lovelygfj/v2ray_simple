@@ -9,15 +9,16 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/proxy"
 	"github.com/e1732a364fed/v2ray_simple/proxy/socks5"
+	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
 //tcp就不测了，我们实践直接测试完全好使，这里重点测试UDP
 // 因为chrome也是无法通过 socks5去申请udp链接的，所以没法自己用浏览器测试
 
-//下面的部分代码在 main.go 中也有用到.
 func TestUDP(t *testing.T) {
+	utils.InitLog("")
 
-	s := &socks5.Server{}
+	s := socks5.NewServer()
 
 	//建立socks5服务并监听，这里仅用于 udp associate 握手
 	sAddrStr := netLayer.GetRandLocalAddr(true, true)
@@ -61,7 +62,7 @@ func TestUDP(t *testing.T) {
 
 					t.Log("socks5 server got udp msg")
 
-					msgConn, err := direct.EstablishUDPChannel(nil, addr)
+					msgConn, err := direct.EstablishUDPChannel(nil, nil, addr)
 					if err != nil {
 						t.Fail()
 						return
@@ -86,7 +87,7 @@ func TestUDP(t *testing.T) {
 	}()
 
 	//建立虚拟目标udp服务器并监听
-	fakeUDP_ServerPort := netLayer.RandPort(true, true)
+	fakeUDP_ServerPort := netLayer.RandPort(true, true, 0)
 
 	fakeRealUDPServerListener, err := net.ListenUDP("udp4", &net.UDPAddr{
 		IP:   net.IPv4(0, 0, 0, 0),

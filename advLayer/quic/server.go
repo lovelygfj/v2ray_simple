@@ -25,16 +25,34 @@ func ListenInitialLayers(addr string, tlsConf tls.Config, arg arguments) (newCon
 	var elistener quic.EarlyListener
 	var err error
 
+	//自己listen，而不是调用 quic.ListenAddr, 这样可以为以后支持 udp的 proxy protocol v2 作准备。
+
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		if ce := utils.CanLogErr("QUIC ResolveUDPAddr failed"); ce != nil {
+			ce.Write(zap.Error(err))
+		}
+		return
+	}
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		if ce := utils.CanLogErr("QUIC listen udp failed"); ce != nil {
+			ce.Write(zap.Error(err))
+		}
+		return
+	}
+
 	if arg.early {
 		utils.Info("quic Listen Early")
-		elistener, err = quic.ListenAddrEarly(addr, &tlsConf, &thisConfig)
+		elistener, err = quic.ListenEarly(conn, &tlsConf, &thisConfig)
 
 	} else {
-		listener, err = quic.ListenAddr(addr, &tlsConf, &thisConfig)
+
+		listener, err = quic.Listen(conn, &tlsConf, &thisConfig)
 
 	}
 	if err != nil {
-		if ce := utils.CanLogErr("quic listen"); ce != nil {
+		if ce := utils.CanLogErr("QUIC listen failed"); ce != nil {
 			ce.Write(zap.Error(err))
 		}
 		return
@@ -66,7 +84,7 @@ func loopAccept(l quic.Listener, theChan chan net.Conn, useHysteria bool, hyster
 
 		conn, err := l.Accept(context.Background())
 		if err != nil {
-			if ce := utils.CanLogErr("quic accept failed"); ce != nil {
+			if ce := utils.CanLogErr("QUIC accept failed"); ce != nil {
 				ce.Write(zap.Error(err))
 			}
 			//close(theChan)	//不应关闭chan，因为listen虽然不好使但是也许现存的stream还是好使的...
@@ -89,7 +107,7 @@ func loopAcceptEarly(el quic.EarlyListener, theChan chan net.Conn, useHysteria b
 
 		conn, err := el.Accept(context.Background())
 		if err != nil {
-			if ce := utils.CanLogErr("quic early accept failed"); ce != nil {
+			if ce := utils.CanLogErr("QUIC early accept failed"); ce != nil {
 				ce.Write(zap.Error(err))
 			}
 			return
@@ -122,7 +140,7 @@ func dealNewConn(conn quic.Connection, theChan chan net.Conn) {
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
-			if ce := utils.CanLogDebug("quic stream accept failed"); ce != nil {
+			if ce := utils.CanLogDebug("QUIC stream accept failed"); ce != nil {
 				//只要某个连接idle时间一长，超过了idleTimeout，服务端就会出现此错误:
 				// timeout: no recent network activity，即 quic.IdleTimeoutError
 				//这不能说是错误, 而是quic的udp特性所致，所以放到debug 输出中.
@@ -139,6 +157,7 @@ func dealNewConn(conn quic.Connection, theChan chan net.Conn) {
 	}
 }
 
+//implements advLayer.SuperMuxServer
 type Server struct {
 	Creator
 
@@ -165,7 +184,10 @@ func (s *Server) Stop() {
 func (s *Server) StartListen() (newSubConnChan chan net.Conn, baseConn io.Closer) {
 
 	newSubConnChan, baseConn = ListenInitialLayers(s.addr, s.tlsConf, s.args)
-	s.listener = baseConn
+	if baseConn != nil {
+		s.listener = baseConn
+
+	}
 	return
 }
 

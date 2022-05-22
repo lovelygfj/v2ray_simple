@@ -32,7 +32,7 @@ type Client struct {
 	connMapMutex sync.RWMutex
 }
 
-func NewClient(addr *netLayer.Addr, alpnList []string, host string, insecure bool, args arguments) *Client {
+func NewClient(addr *netLayer.Addr, tConf tls.Config, args arguments) *Client {
 
 	if args.hysteriaMaxByteCount <= 0 {
 		args.hysteriaMaxByteCount = Default_hysteriaMaxByteCount
@@ -40,17 +40,16 @@ func NewClient(addr *netLayer.Addr, alpnList []string, host string, insecure boo
 
 	return &Client{
 		serverAddrStr: addr.String(),
-		tlsConf: tls.Config{
-			InsecureSkipVerify: insecure,
-			ServerName:         host,
-			NextProtos:         alpnList,
-		},
-		arguments: args,
+		tlsConf:       tConf,
+		arguments:     args,
 	}
 }
 
-//trimBadConns removes non-Active sessions, 并试图返回 最佳的可用于新stream的session
+//trimBadConns removes non-Active sessions, and try to pick and return the best session for a new stream
 func (c *Client) trimBadConns() (bestConn *connState) {
+
+	//我们对 each session所打开过的stream进行计数，这样就可以探知 服务端 的 最大stream数设置.
+
 	minSessionNum := 10000
 	for id, thisState := range c.clientconns {
 		if isActive(thisState) {
@@ -102,12 +101,6 @@ func (c *Client) GetCommonConn(_ net.Conn) (any, error) {
 }
 
 func (c *Client) getCommonConn(_ net.Conn) (*connState, error) {
-	//返回 *sessionState.
-
-	//我们采用预先openStream的策略, 来试出哪些session已经满了, 哪些没满
-	// 已知的是, a session满了之后, 要等待 0～45秒 或以上的时间, 才能它才可能腾出空位
-
-	//我们对 each session所打开过的stream进行计数，这样就可以探知 服务端 的 最大stream数设置.
 
 	{
 
@@ -132,21 +125,30 @@ func (c *Client) getCommonConn(_ net.Conn) (*connState, error) {
 	var conn quic.Connection
 	var err error
 
+	rudpAddr, err := net.ResolveUDPAddr("udp", c.serverAddrStr)
+	if err != nil {
+		return nil, err
+	}
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return nil, err
+	}
+
 	if c.early {
 		utils.Debug("quic Dialing Early")
-		conn, err = quic.DialAddrEarly(c.serverAddrStr, &c.tlsConf, &common_DialConfig)
+		//conn, err = quic.DialAddrEarly(c.serverAddrStr, &c.tlsConf, &common_DialConfig)
+		conn, err = quic.DialEarly(udpConn, rudpAddr, c.serverAddrStr, &c.tlsConf, &common_DialConfig)
 
 	} else {
 
 		utils.Debug("quic Dialing Connection")
-		conn, err = quic.DialAddr(c.serverAddrStr, &c.tlsConf, &common_DialConfig)
+		//conn, err = quic.DialAddr(c.serverAddrStr, &c.tlsConf, &common_DialConfig)
+		conn, err = quic.Dial(udpConn, rudpAddr, c.serverAddrStr, &c.tlsConf, &common_DialConfig)
 
 	}
 
 	if err != nil {
-		if ce := utils.CanLogErr("QUIC:  dial failed"); ce != nil {
-			ce.Write(zap.Error(err))
-		}
+
 		return nil, err
 	}
 

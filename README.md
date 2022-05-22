@@ -18,6 +18,8 @@ verysimple， 实际上 谐音来自 V2ray Simple (显然只适用于汉语母�
 
 verysimple 是一个 代理内核, 对标 v2ray/xray，功能较为丰富。
 
+本作的想法是，使用自己的代码，实现v2ray的所有的好的功能（并摒弃差的功能），而且使用自主研发的更简单的架构，结合自主研发的新技术，实现反超。
+
 verysimple项目大大简化了 转发机制，能提高运行速度。本项目 转发流量时，关键代码直接放在main.go里！非常直白易懂。
 
 只有项目名称是v2ray_simple，其它所有场合 全使用 verysimple 这个名称，可简称 "vs"。本作过于极简，极简得连logo也没有.
@@ -30,19 +32,30 @@ vs的一些亮点是 全协议readv加速，lazy技术，vless v1，hysteria 阻
 
 支持的功能有:
 
-socks5(包括 udp associate)/http/dokodemo/tproxy(透明代理)/trojan/simplesocks/vless(v0/v1), 
+socks5(包括 udp associate 以及用户密码)/http(以及用户密码)/socks5http(与clash的mixed等价)/dokodemo/tproxy(透明代理)/trojan/simplesocks/vless(v0/v1)/vmess, 多用户,
 
-ws(以及earlydata)/grpc(以及multiMode,uTls，以及 支持回落的 grpcSimple)/quic(以及hy阻控 和 0-rtt)/smux, 
+ws(以及earlydata)/grpc(以及multiMode,uTls，以及 支持回落的 grpcSimple)/quic(以及hy阻控、手动挡 和 0-rtt)/smux, 
 
-dns(udp/tls)/route(geoip/geosite)/fallback(path/sni/alpn/PROXY protocol v1/v2), 
+dns(udp/tls)/route(geoip/geosite,分流功能完全与v2ray等价)/fallback(path/sni/alpn/PROXY protocol v1/v2), sniffing(tls)
 
-tcp/udp/unix domain socket, uTls, lazy, http伪装头, cli(交互模式)/apiServer
+tcp/udp(以及fullcone)/unix domain socket, tls(包括客户端证书验证), uTls,【tls lazy encrypt】, http伪装头,PROXY protocol v1/v2 监听,
+
+cli(交互模式)/apiServer, Docker, docker-compose.
 
 
 为了不吓跑小白，本 README 把安装、使用方式 放在了前面，如果你要直接阅读本作的技术介绍部分，点击跳转 -> [创新点](#创新点)
 
 
+
 ## 安装方式：
+
+对觉得本作安装很复杂的人，我再强调一遍: 
+
+本作对标的是 v2ray和xray等内核，不是对标的“安装脚本”，**本作是个内核**，再说一遍。内核能支持各种交互模式已经很强大了好不好。
+
+你见哪个内核项目负责人自己上来就提供完整一键脚本的？都是其他人帮着提供的，我这么忙哪有时间研究一键脚本。有需求的你可以写一个然后提PR啊。
+
+本内核完全是我自己写的，完全不同于 xray这种 fork的版本，所以我很忙的。
 
 ### 下载安装
 
@@ -61,7 +74,7 @@ tcp/udp/unix domain socket, uTls, lazy, http伪装头, cli(交互模式)/apiServ
 
 ```sh
 #在verysimple可执行文件所在目录
-git clone github.com/v2fly/domain-list-community
+git clone https://github.com/v2fly/domain-list-community
 mv domain-list-community geosite
 ```
 
@@ -187,9 +200,12 @@ verysimple -c server.toml
 5. 调节日志等级
 6. 调节hy手动挡
 7. 生成一个随机的uuid供你参考
-8. 下载geosite原文件
-9. 打印当前版本所支持的所有协议
-10. 查询当前状态
+8. 下载geosite文件夹
+9. 下载geoip文件(GeoLite2-Country.mmdb)
+10. 打印当前版本所支持的所有协议
+11. 查询当前状态
+12. 为tproxy设置iptables(12345端口)
+13. 为tproxy移除iptables
 
 
 交互生成配置后还可以输出到文件、加载到当前运行环境、生成分享链接。
@@ -218,6 +234,24 @@ openssl req -new -x509 -days 7305 -key cert.key -out cert.pem
 
 此命令会生成ecc证书，这个证书比rsa证书 速度更快, 有利于网速加速（加速tls握手）。
 
+#### 使用客户端证书的 高玩情况：
+
+小白请无视这一段。
+
+```sh
+# 生成ca的命令:
+openssl ecparam -genkey -name prime256v1 -out ca.key    
+openssl req -new -x509 -days 365 -sha256 -key ca.key -out ca.crt  #会提示让你输入 CountryName 等信息。
+
+# 用ca生成客户端key和crt
+openssl ecparam -genkey -name prime256v1 -out client.key
+openssl req -new -key client.key -out client.csr   #会提示 让你输入 CountryName 等信息。
+openssl x509 -req -days 365 -sha256  -in client.csr -CA ca.crt -CAkey ca.key -set_serial 01 -out client.crt
+```
+
+之后, ca.crt 用于CA (服务端要配置这个), client.key 和 client.crt 用于 客户端证书 （客户端要配置这个）
+
+注意 上面的openssl 生成 crt 的两个命令 要使用 -sha256参数, 因为默认的sha1已经不安全, 在go1.18中被废弃了。
 
 ### 交互模式 生成证书
 
@@ -279,7 +313,7 @@ v0协议是直接兼容现有v2ray/xray的，比如可以客户端用任何现�
 
 默认回落，以及按 path/sni/alpn 回落
 
-按 geoip,geosite,ip,cidr,domain,inTag,network 分流，以及 按国别 顶级域名分流，用到了 mmdb和 v2fly的社区维护版域名列表
+按 geoip,geosite,ip,cidr,domain,tag,network 分流，以及 按国别 顶级域名分流，用到了 mmdb和 v2fly的社区维护版域名列表
 
 支持utls伪装tls指纹，本作的 utls 还可以在 用 websocket和grpc 时使用
 
@@ -287,13 +321,17 @@ v0协议是直接兼容现有v2ray/xray的，比如可以客户端用任何现�
 
 支持grpc，与 xray/v2ray兼容; 还有 grpcSimple，见上文。
 
+真实 nginx响应。
+
 支持 quic以及hysteria 阻控，与xray/v2ray兼容（详情见wiki）,还新开发了“手动挡”模式
 
 api服务器；tproxy 透明代理； http伪装头.
 
 本作也是支持 trojan-go 声称的 “可插拔模块”的，没什么复杂的。而且也可以用build tag 来开启或关闭某项功能。
 
-本作也是支持 clash 的 "use as library" 的，而且非常简单，你看godoc文档就懂了。
+本作也是支持 clash 的 "use as library" 的，而且更加简单，very simple，你看godoc文档就懂了，主项目就一个主要的函数。
+
+支持 Docker 容器, 见 #56，以及 cmd/verysimple/Dockerfile,  相关问题请找 该PR作者。
 
 总之，可以看到，几乎在每一个技术上 本作都有一定的优化，超越其他内核，非常 Nice。
 
@@ -308,6 +346,10 @@ api服务器；tproxy 透明代理； http伪装头.
 同时，vmess这种 信息熵 太大 的协议已经 应该退出历史舞台，本作予以淘汰，不再支持。
 
 目前认为只有外层为 tls 的、支持回落的 协议才是主流。
+
+然而，最近墙的 sni 阻断行为再一次打我脸了。看来 vmess/ssr 这种完全随机的协议还是有必要继续使用。。。
+
+
 
 ### 关于vless v1
 
@@ -453,11 +495,11 @@ https://github.com/e1732a364fed/v2ray_simple/discussions
 
 #### 开发者入门指导
 
-首先学会使用verysimple，熟读本 README.md 和 examples/ 下的配置文件
+首先学会使用verysimple，熟读本 README.md 和 examples/ 下的配置文件.
 
-之后读 version.go 文件里的 注释，对本作结构有一个认识。然后读 proxy/doc.go 理解 VSI模型。
+之后读 doc.go 和 cmd/verysimple/version.go 文件里的 注释，对本作结构有一个认识。然后读 proxy/doc.go 理解 VSI模型。
 
-之后 学习 proxy.ProxyCommon 接口.
+之后 学习 proxy.BaseInterface 接口 和其 实现 proxy.Base. 之后学习 advLayer 里的各个接口。
 
 之后就可以在go doc中选择自己感兴趣的地方阅读了。
 
@@ -611,21 +653,26 @@ MIT协议！作者不负任何责任。本项目 适合内网测试使用，以�
 
 同时，我们对于v2ray/xray等项目也是没有任何责任的。
 
-## 引用的外部包
-
-详见 go.mod 文件
 
 ## 鸣谢
 
 为了支持hysteria 的阻塞控制，从 https://github.com/HyNetwork/hysteria 的 pkg/congestion里拷贝了 brutal.go 和 pacer.go 到我们的 quic文件夹中.
 
-grpcSimple的客户端实现部分 借鉴了 clash 的gun的代码。（clash的gun又是借鉴 Qv2ray的gun的）
+grpcSimple的客户端实现部分 借鉴了 clash 的gun的代码，该文件单独属于MIT协议，其文件开头都写了，不信自己看。（clash的gun又是借鉴 Qv2ray的gun的）
 
 tproxy借鉴了 https://github.com/LiamHaworth/go-tproxy/ , （trojan-go也借鉴了它）
 
+来自v2ray的代码有：quic的嗅探，geosite文件的解析(v2fly/domain-list-community), vmess的 ShakeSizeParser 和 openAEADHeader 等函数。
+
+（grpc参考了v2ray但是没直接拷贝，而是自己写的。代码看起来像 主要因为 protobuf和grpc谷歌包的特点，导致只要代码是兼容的，写出来肯定是很相似的）
+
 以上借鉴的代码都是用的MIT协议。
 
+vmess 的客户端代码 来自 github.com/Dreamacro/clash/transport/vmess, 使用的是 GPLv3协议。该协议我直接 放在 proxy/vmess/ 文件夹下了。
+
+同时我通过该vmess 客户端代码 反推出了 对应的服务端代码。
 
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/e1732a364fed/v2ray_simple.svg)](https://starchart.cc/e1732a364fed/v2ray_simple)
+

@@ -24,7 +24,7 @@ func HandshakeTCP(tcpConn *net.TCPConn) netLayer.Addr {
 var udpMsgConnMap = make(map[netLayer.HashableAddr]*MsgConn)
 
 //从一个透明代理udp连接中读取到实际地址，并返回 *MsgConn
-func HandshakeUDP(underlay *net.UDPConn) (netLayer.MsgConn, netLayer.Addr, error) {
+func HandshakeUDP(underlay *net.UDPConn) (*MsgConn, netLayer.Addr, error) {
 	bs := utils.GetPacket()
 	n, src, dst, err := ReadFromUDP(underlay, bs)
 	if err != nil {
@@ -39,6 +39,7 @@ func HandshakeUDP(underlay *net.UDPConn) (netLayer.MsgConn, netLayer.Addr, error
 			readChan:   make(chan netLayer.AddrData, 5),
 			closeChan:  make(chan struct{}),
 		}
+		conn.InitEasyDeadline()
 
 		udpMsgConnMap[hash] = conn
 
@@ -51,11 +52,15 @@ func HandshakeUDP(underlay *net.UDPConn) (netLayer.MsgConn, netLayer.Addr, error
 
 //implements netLayer.MsgConn
 type MsgConn struct {
+	netLayer.EasyDeadline
+
 	ourSrcAddr *net.UDPAddr
 
 	readChan chan netLayer.AddrData
 
 	closeChan chan struct{}
+
+	fullcone bool
 }
 
 func (mc *MsgConn) Close() error {
@@ -72,16 +77,20 @@ func (mc *MsgConn) CloseConnWithRaddr(raddr netLayer.Addr) error {
 }
 
 func (mc *MsgConn) Fullcone() bool {
-	return true
+	return mc.fullcone
+}
+
+func (mc *MsgConn) SetFullcone(f bool) {
+	mc.fullcone = f
 }
 
 func (mc *MsgConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
 
-	timeoutChan := time.After(netLayer.UDP_timeout)
+	must_timeoutChan := time.After(netLayer.UDP_timeout)
 	select {
 	case <-mc.closeChan:
 		return nil, netLayer.Addr{}, io.EOF
-	case <-timeoutChan:
+	case <-must_timeoutChan:
 		return nil, netLayer.Addr{}, os.ErrDeadlineExceeded
 	case newmsg := <-mc.readChan:
 		return newmsg.Data, newmsg.Addr, nil

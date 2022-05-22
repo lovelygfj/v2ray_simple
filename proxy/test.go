@@ -42,14 +42,20 @@ func TestTCP(protocol string, version int, port string, t *testing.T) {
 		t.Logf("can not listen on %v: %v", server.AddrStr(), err)
 		t.FailNow()
 	}
+	var testOK bool
+	defer listener.Close()
 	go func() {
 		for {
 			lc, err := listener.Accept()
-			if err != nil {
+			if err != nil && !testOK {
 				t.Logf("failed in accept: %v", err)
 				t.Fail()
+				return
 			}
 			t.Log(protocol + " server got new conn")
+			if lc == nil {
+				return
+			}
 			go func() {
 				defer lc.Close()
 				wlc, _, targetAddr, err := server.Handshake(lc)
@@ -103,11 +109,16 @@ func TestTCP(protocol string, version int, port string, t *testing.T) {
 		t.Log("io.ReadFull(wrc, world[:])", err)
 		t.FailNow()
 	}
+	t.Log("client read ok")
 
 	if !bytes.Equal(world[:], []byte("world")) {
 		t.Log("not equal", string(world[:]), world[:], n)
 		t.FailNow()
 	}
+
+	t.Log("client match ok")
+
+	testOK = true
 }
 
 // 完整模拟整个 protocol 的udp请求 过程，即 客户端连接代理服务器，代理服务器试图访问远程服务器，这里是使用的模拟的办法模拟出一个远程udp服务器；
@@ -133,7 +144,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 		t.FailNow()
 	}
 
-	fakeRealUDPServerPort := netLayer.RandPort(true, true)
+	fakeRealUDPServerPort := netLayer.RandPort(true, true, 0)
 
 	t.Log("fake remote udp server port is ", fakeRealUDPServerPort)
 
@@ -208,6 +219,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 		t.Logf("can not listen on %v: %v", fakeServerEndLocalServer.AddrStr(), err)
 		t.FailNow()
 	}
+	defer listener.Close()
 
 	//一个完整的 protocol 服务端， 将客户端发来的udp数据转发到 目的地
 	go func() {
@@ -299,7 +311,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 
 	t.Log("client Dial success")
 
-	wrc, err := fakeClientEndRemoteClient.EstablishUDPChannel(rc, targetStruct_forFakeUDPServer)
+	wrc, err := fakeClientEndRemoteClient.EstablishUDPChannel(rc, nil, targetStruct_forFakeUDPServer)
 	if err != nil {
 		log.Printf("failed in handshake to %v: %v", fakeServerEndLocalServer.AddrStr(), err)
 		t.FailNow()

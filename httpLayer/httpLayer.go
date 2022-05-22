@@ -1,5 +1,5 @@
 /*
-Package httpLayer provides methods and definitions for http layer.
+Package httpLayer provides methods for parsing and sending http request and response.
 
 Fallback 由 本包 处理. 因为回落的目标只可能是http服务器.
 
@@ -8,14 +8,25 @@ http头 格式 可以参考：
 https://datatracker.ietf.org/doc/html/rfc2616#section-4
 
 https://datatracker.ietf.org/doc/html/rfc2616#section-5
+
+V2ray 兼容性
+
+http头我们希望能够完全兼容 v2ray的行为。
+
+观察v2ray的实现，在没有header时，还会添加一个 Date ，这个v2ray的文档里没提
+
+v2ray文档: https://www.v2fly.org/config/transport/tcp.html#noneheaderobject
+
+相关 v2ray代码: https://github.com/v2fly/v2ray-core/tree/master/transport/internet/headers/http/http.go
+
+我们虽然宣称兼容 v2ray，但在对于这种 不在 v2ray文档里提及的 代码实现, 我们不予支持。
+
 */
 package httpLayer
 
 import (
 	"bytes"
-	"errors"
 	"io"
-	"net"
 	"strings"
 
 	"github.com/e1732a364fed/v2ray_simple/utils"
@@ -24,15 +35,7 @@ import (
 	"net/http/httptest"
 )
 
-var Err404response = `HTTP/1.1 404 Not Found\r\nContent-Type: text/html
-Connection: keep-alive\r\n404 Not Found\r\n`
-
-const Err403response = `HTTP/1.1 403 Forbidden
-Connection: close
-Cache-Control: max-age=3600, public
-Content-Length: 0
-
-`
+const Err403response = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nCache-Control: max-age=3600, public\r\nContent-Length: 0\r\n\r\n"
 
 const (
 	H11_Str = "http/1.1"
@@ -51,7 +54,9 @@ const (
 var (
 	HeaderENDING_bytes = []byte(HeaderENDING)
 
-	ErrNotHTTP_Request = errors.New("not http request")
+	ErrNotHTTP_Request = utils.InvalidDataErr("not http request")
+
+	Err400response_golang string
 )
 
 func init() {
@@ -64,7 +69,7 @@ func init() {
 	buf := &bytes.Buffer{}
 	w.Result().Write(buf)
 
-	Err404response = buf.String()
+	Err400response_golang = buf.String()
 
 }
 
@@ -86,12 +91,12 @@ func (e *RequestErr) Is(err error) bool {
 	return false
 }
 
-func (pe *RequestErr) Error() string {
+func (e *RequestErr) Error() string {
 	var sb strings.Builder
 	sb.WriteString("InvaidRequest ")
-	sb.WriteString(pe.Method)
+	sb.WriteString(e.Method)
 	sb.WriteString(",")
-	sb.WriteString(pe.Path)
+	sb.WriteString(e.Path)
 
 	return sb.String()
 }
@@ -106,10 +111,11 @@ type H1RequestParser struct {
 	Method          string
 	WholeRequestBuf *bytes.Buffer
 	Failreason      int //为0表示没错误
+	Headers         []RawHeader
 }
 
 // 尝试读取数据并解析HTTP请求, 解析道道 数据会存入 RequestParser 结构中.
-//如果读取错误,会返回该错误; 如果读到的不是HTTP请求，返回 ErrNotHTTP_Request;
+//如果读取错误,会返回该错误; 如果读到的不是HTTP请求，返回 的err 的 errors.Is(err,ErrNotHTTP_Request) == true;
 func (rhr *H1RequestParser) ReadAndParse(r io.Reader) error {
 	bs := utils.GetPacket()
 
@@ -121,20 +127,9 @@ func (rhr *H1RequestParser) ReadAndParse(r io.Reader) error {
 	buf := bytes.NewBuffer(data)
 	rhr.WholeRequestBuf = buf
 
-	rhr.Version, rhr.Method, rhr.Path, rhr.Failreason = GetRequestMethod_and_PATH_from_Bytes(data, false)
+	rhr.Version, rhr.Method, rhr.Path, rhr.Headers, rhr.Failreason = ParseH1Request(data, false)
 	if rhr.Failreason != 0 {
 		return utils.ErrInErr{ErrDesc: "httpLayer ReadAndParse failed", ErrDetail: ErrNotHTTP_Request, Data: rhr.Failreason}
 	}
 	return nil
-}
-
-// http level fallback metadata
-type FallbackMeta struct {
-	net.Conn
-	H1RequestBuf *bytes.Buffer
-	Path         string
-	Method       string
-	IsH2         bool
-
-	H2Request *http.Request
 }

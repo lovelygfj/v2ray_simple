@@ -25,7 +25,7 @@ func (ClientCreator) NewClientFromURL(u *url.URL) (proxy.Client, error) {
 func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
 
 	uuidStr := dc.Uuid
-	id, err := proxy.NewV2rayUser(uuidStr)
+	id, err := utils.NewV2rayUser(uuidStr)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
 
 func NewClientByURL(url *url.URL) (proxy.Client, error) {
 	uuidStr := url.User.Username()
-	id, err := proxy.NewV2rayUser(uuidStr)
+	id, err := utils.NewV2rayUser(uuidStr)
 	if err != nil {
 		return nil, err
 	}
@@ -98,11 +98,11 @@ func NewClientByURL(url *url.URL) (proxy.Client, error) {
 
 //实现 proxy.UserClient
 type Client struct {
-	proxy.ProxyCommonStruct
+	proxy.Base
 
 	version int
 
-	user proxy.V2rayUser
+	user utils.V2rayUser
 
 	udp_multi bool
 	use_mux   bool
@@ -118,7 +118,7 @@ func (c *Client) Name() string {
 	// 直接 + 比 fmt.Sprintf 快不少.
 }
 func (c *Client) Version() int { return c.version }
-func (c *Client) GetUser() proxy.User {
+func (c *Client) GetUser() utils.User {
 	return c.user
 }
 
@@ -173,7 +173,7 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 	if c.version == 0 {
 		uc := &UserTCPConn{
 			Conn:            underlay,
-			uuid:            c.user,
+			V2rayUser:       c.user,
 			version:         c.version,
 			underlayIsBasic: netLayer.IsBasicConn(underlay),
 		}
@@ -189,7 +189,7 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 
 }
 
-func (c *Client) EstablishUDPChannel(underlay net.Conn, target netLayer.Addr) (netLayer.MsgConn, error) {
+func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, target netLayer.Addr) (netLayer.MsgConn, error) {
 
 	buf := c.getBufWithCmd(CmdUDP)
 	port := target.Port
@@ -203,14 +203,21 @@ func (c *Client) EstablishUDPChannel(underlay net.Conn, target netLayer.Addr) (n
 
 	target.Network = "udp"
 
-	return &UDPConn{
+	uc := &UDPConn{
 		Conn:         underlay,
+		V2rayUser:    c.user,
 		version:      c.version,
 		isClientEnd:  true,
 		raddr:        target,
 		udp_multi:    c.udp_multi,
 		handshakeBuf: buf,
-	}, nil
+		fullcone:     c.IsFullcone,
+	}
+	if len(firstPayload) == 0 {
+		return uc, nil
+	} else {
+		return uc, uc.WriteMsgTo(firstPayload, target)
+	}
 
 }
 

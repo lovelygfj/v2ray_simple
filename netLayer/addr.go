@@ -63,8 +63,9 @@ func init() {
 }
 
 //if mustValid is true, a valid port is assured.
-// isudp is used to determine whether you want to use udp
-func RandPort(mustValid, isudp bool) (p int) {
+// isudp is used to determine whether you want to use udp.
+// depth 填0 即可，用于递归。
+func RandPort(mustValid, isudp bool, depth int) (p int) {
 	p = rand.Intn(randPortBase) + 4096
 	if !mustValid {
 		return
@@ -84,7 +85,16 @@ func RandPort(mustValid, isudp bool) (p int) {
 				ce.Write()
 			}
 
-			return RandPort(mustValid, true)
+			if depth < 20 {
+				return RandPort(mustValid, true, depth+1)
+
+			} else {
+				if ce := utils.CanLogDebug("Get RandPort udp but got err, and depth reach limit, return directly"); ce != nil {
+					ce.Write()
+				}
+				return
+			}
+
 		}
 	} else {
 		listener, err := net.ListenTCP("tcp", &net.TCPAddr{
@@ -101,7 +111,15 @@ func RandPort(mustValid, isudp bool) (p int) {
 				ce.Write()
 			}
 
-			return RandPort(mustValid, false)
+			if depth < 20 {
+				return RandPort(mustValid, false, depth+1)
+
+			} else {
+				if ce := utils.CanLogDebug("Get RandPort udp but got err, and depth reach limit, return directly"); ce != nil {
+					ce.Write()
+				}
+				return
+			}
 		}
 
 	}
@@ -110,11 +128,11 @@ func RandPort(mustValid, isudp bool) (p int) {
 }
 
 func RandPortStr(mustValid, isudp bool) string {
-	return strconv.Itoa(RandPort(mustValid, isudp))
+	return strconv.Itoa(RandPort(mustValid, isudp, 0))
 }
 
 func RandPort_andStr(mustValid, isudp bool) (int, string) {
-	pt := RandPort(mustValid, isudp)
+	pt := RandPort(mustValid, isudp, 0)
 	return pt, strconv.Itoa(pt)
 }
 
@@ -161,6 +179,9 @@ func NewAddrByHostPort(hostPortStr string) (Addr, error) {
 		host = "127.0.0.1"
 	}
 	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return Addr{}, err
+	}
 
 	a := Addr{Port: port}
 	if ip := net.ParseIP(host); ip != nil {
@@ -193,6 +214,9 @@ func NewAddrByURL(addrStr string) (Addr, error) {
 		host = "127.0.0.1"
 	}
 	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return Addr{}, err
+	}
 
 	a := Addr{Port: port}
 	if ip := net.ParseIP(host); ip != nil {
@@ -256,20 +280,20 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 
 	case uint64:
 
-		if value > 65535 || value < 0 {
+		if value > 65535 {
 			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
 			return
 		}
 		integer = int(value)
 	case uint:
 
-		if value > 65535 || value < 0 {
+		if value > 65535 {
 			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
 			return
 		}
 		integer = int(value)
 	case uint32:
-		if value > 65535 || value < 0 {
+		if value > 65535 {
 			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
 			return
 		}
@@ -522,4 +546,90 @@ func UDPAddr2AddrPort(ua *net.UDPAddr) netip.AddrPort {
 	}
 	a, _ := netip.AddrFromSlice(ua.IP)
 	return netip.AddrPortFrom(a, uint16(ua.Port))
+}
+
+//依照 vmess/vless 协议的格式 依次读取 地址的 port, 域名/ip 信息
+func V2rayGetAddrFrom(buf utils.ByteReader) (addr Addr, err error) {
+
+	pb1, err := buf.ReadByte()
+	if err != nil {
+		return
+	}
+
+	pb2, err := buf.ReadByte()
+	if err != nil {
+		return
+	}
+
+	port := uint16(pb1)<<8 + uint16(pb2)
+	if port == 0 {
+		err = utils.ErrInvalidData
+		return
+	}
+	addr.Port = int(port)
+
+	var b1 byte
+
+	b1, err = buf.ReadByte()
+	if err != nil {
+		return
+	}
+
+	switch b1 {
+	case AtypDomain:
+		var b2 byte
+		b2, err = buf.ReadByte()
+		if err != nil {
+			return
+		}
+
+		if b2 == 0 {
+			err = errors.New("got ATypDomain but domain lenth is marked to be 0")
+			return
+		}
+
+		bs := utils.GetBytes(int(b2))
+		var n int
+		n, err = buf.Read(bs)
+		if err != nil {
+			return
+		}
+
+		if n != int(b2) {
+			err = utils.ErrShortRead
+			return
+		}
+		addr.Name = string(bs[:n])
+
+	case AtypIP4:
+		bs := make([]byte, 4)
+		var n int
+		n, err = buf.Read(bs)
+
+		if err != nil {
+			return
+		}
+		if n != 4 {
+			err = utils.ErrShortRead
+			return
+		}
+		addr.IP = bs
+	case AtypIP6:
+		bs := make([]byte, net.IPv6len)
+		var n int
+		n, err = buf.Read(bs)
+		if err != nil {
+			return
+		}
+		if n != 4 {
+			err = utils.ErrShortRead
+			return
+		}
+		addr.IP = bs
+	default:
+		err = utils.ErrInvalidData
+		return
+	}
+
+	return
 }

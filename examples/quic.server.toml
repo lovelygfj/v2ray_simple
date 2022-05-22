@@ -3,7 +3,6 @@ protocol = "vlesss"
 uuid = "a684455c-b14f-11ea-bf0d-42010aaa0003"
 host = "0.0.0.0"
 port = 4434
-version = 0
 insecure = true
 
 
@@ -13,6 +12,8 @@ cert = "cert.pem"
 key = "cert.key"
 advancedLayer = "quic"
 
+#ca = "ca.crt"  # 可选，用于客户端证书 的验证
+
 # network = udp # 只要 advancedLayer 设成了quic，network 就会自动被配置为udp，所以不需手动指定udp
 
 #alpn = ["asdfsadf"]    #如果指定alpn，则客户端和服务端都要指定，而且要相同
@@ -20,6 +21,9 @@ advancedLayer = "quic"
 #early = true # 开启 quic 0-rtt功能。注意, 两端都要开启，且 v2ray/xray没有这个功能.
 
 # hy_manual的意思是手动挡, 注意, 你要想提高下载速度，需要手动调节服务端的挡;
+# 你也可以给 手动挡设置一个初始值，这样可以省着每次运行都要先调; 范围是 0.2～1.5，值越小则 速度可能越快, 也不建议太小,自己试, 实际倍率是 1.5/rate, 这里设为 0.5 就是 3倍率.
+
+#extra = { congestion_control = "hy", mbps = 100, hy_manual = true , hy_manual_initial_rate = 0.5} 
 #extra = { congestion_control = "hy", mbps = 100, hy_manual = true } 
 #extra = { congestion_control = "hy", mbps = 3000 } 
 
@@ -33,6 +37,9 @@ advancedLayer = "quic"
 #  如果你非要和v2ray一样那你就设成32试试，肯定速度很糟糕。
 #
 #extra = { maxStreamsInOneConn = 6 }  
+
+#另外一个注意点就是，本示例 提供了 多行 extra的示例，而实际上你只能给出一行，不允许 给出好几行 key一样的，这是toml的规则。
+# 你要是 想应用多个 extra配置，那你就 把 多个 合并成一个 进行 书写
 
 [[dial]]
 protocol = "direct"

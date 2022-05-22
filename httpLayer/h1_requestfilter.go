@@ -1,11 +1,22 @@
 package httpLayer
 
-// GetRequestMethod_and_PATH_from_Bytes 从一个字节串中试图获取 http请求的 path,和 method.
-// failreason>0 表示获取失败. 不会返回小于0的值
-// 同时可以用这个方法判断明文 是不是 http1.1, http1.0, http0.9的 http请求
-// 如果是http代理的话，判断方式会有变化,所以需要 isproxy 参数
-// 此方法亦可以用于 判断一个http请求头部是否合法
-func GetRequestMethod_and_PATH_from_Bytes(bs []byte, isproxy bool) (version, method string, path string, failreason int) {
+import (
+	"bytes"
+)
+
+//也许有 ws 的 earlydata放在 query请求里的情况; 虽然本作不支持这种earlydata, 但是也要认定这是合法的请求。
+const MaxParseUrlLen = 3000
+
+type RawHeader struct {
+	Head  []byte
+	Value []byte
+}
+
+// 从数据中试图获取 http1.1, http1.0或 http0.9 请求的 version, path, method 和 headers.
+// failreason!=0 表示获取失败, 即表示不是合法的h1请求.
+//
+// 如果是http代理的话，判断方式会有变化,所以需要 isproxy 参数。
+func ParseH1Request(bs []byte, isproxy bool) (version, method, path string, headers []RawHeader, failreason int) {
 
 	if len(bs) < 16 { //http0.9 最小长度为16， http1.0及1.1最小长度为18
 		failreason = 1
@@ -13,8 +24,8 @@ func GetRequestMethod_and_PATH_from_Bytes(bs []byte, isproxy bool) (version, met
 	}
 
 	if bs[4] == '*' {
-		failreason = 2
-		return //not h2c
+		failreason = 2 //this method doesn't support h2c
+		return
 
 	}
 	//http 方法有：GET, POST, HEAD, PUT, DELETE, OPTIONS, CONNECT, PRI
@@ -111,8 +122,8 @@ func GetRequestMethod_and_PATH_from_Bytes(bs []byte, isproxy bool) (version, met
 
 	last := len(bs)
 	if !isproxy { //如果是代理，则我们要判断整个请求，不能漏掉任何部分
-		if last > 64 {
-			last = 64
+		if last > MaxParseUrlLen {
+			last = MaxParseUrlLen
 		}
 	}
 
@@ -130,12 +141,50 @@ func GetRequestMethod_and_PATH_from_Bytes(bs []byte, isproxy bool) (version, met
 				return
 			}
 
-			version = string(bs[i+6 : i+9])
 			path = string(bs[shouldSlashIndex:i])
+
+			if string(bs[i+1:i+5]) != "HTTP" {
+				failreason = 10
+				return
+			}
+
+			version = string(bs[i+6 : i+9])
+			if bs[i+9] != '\r' || bs[i+10] != '\n' {
+				failreason = -11
+				return
+			}
+
+			leftBs := bs[i+11:]
+
+			indexOfEnding := bytes.Index(leftBs, HeaderENDING_bytes)
+			if indexOfEnding < 0 {
+				failreason = -12
+				return
+
+			}
+			headerBytes := leftBs[:indexOfEnding]
+			headerBytesList := bytes.Split(headerBytes, []byte(CRLF))
+			for _, header := range headerBytesList {
+
+				ss := bytes.SplitN(header, []byte(":"), 2)
+				if len(ss) != 2 {
+					failreason = -13
+					return
+				}
+				headers = append(headers, RawHeader{
+					Head:  bytes.TrimLeft(ss[0], " "),
+					Value: bytes.TrimLeft(ss[1], " "),
+				})
+
+			}
+			//http1.1 要有 Host 这个header，参考
+			// https://stackoverflow.com/questions/25047905/http-request-minimum-size-in-bytes/25065089
+			// https://stackoverflow.com/questions/9233316/what-is-the-smallest-possible-http-and-https-data-request
+
 			return
 		}
 	}
-	failreason = last //!isproxy时, 我们只判断了前64字节，如果访问url更长的话，这里还是会返回failreason的
+	failreason = last //!isproxy时, 我们只判断了前 MaxParseUrlLen 字节，如果访问url更长的话，这里还是会返回failreason的
 	return
 
 }
