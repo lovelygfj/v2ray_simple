@@ -16,7 +16,6 @@ var PDD bool //print tls detect detail
 var OnlyTest bool
 
 func init() {
-	//log.SetOutput(os.Stdout) //主要是日志太多，如果都能直接用管道放到文件中就好了，默认不是Stdout所以有点尴尬，操作麻烦点
 
 	flag.BoolVar(&PDD, "pdd", false, "print tls detect detail")
 	flag.BoolVar(&OnlyTest, "ot", false, "only detect tls, doesn't actually mark tls")
@@ -26,7 +25,7 @@ func init() {
 // 用于 探测 承载数据是否使用了tls, 它先与 底层tcp连接 进行 数据传输，然后查看传输到内容
 // 	可以参考 https://www.baeldung.com/linux/tcpdump-capture-ssl-handshake
 type SniffConn struct {
-	net.Conn //这个 Conn本DetectConn 中不会用到，只是为了能让 SniffConn 支持 net.Conn
+	net.Conn //这个 Conn 在 SniffConn 中不会用到，只是为了能让 SniffConn 支持 net.Conn
 	W        *DetectLazyWriter
 	R        *DetectReader
 
@@ -50,7 +49,7 @@ func (cc *SniffConn) ReadFrom(r io.Reader) (int64, error) {
 	return 0, io.EOF
 }
 
-//可选两个参数传入，优先使用rw ，为nil的话 再使用oldConn，作为 DetectConn 的 Read 和Write的 具体调用的主体
+//可选两个参数传入，优先使用rw ，为nil的话 再使用oldConn，作为 SniffConn 的 Read 和Write的 具体调用的主体
 // is_secure 表示，是否使用更强的过滤手段（越强越浪费时间, 但是越安全）
 func NewSniffConn(oldConn net.Conn, rw io.ReadWriter, isclient bool, is_secure bool, sniffedFirstPart *ComSniff) *SniffConn {
 
@@ -92,7 +91,7 @@ type ComSniff struct {
 
 	SpecialCommandBytes []byte //目前规定，使用uuid作为special command
 
-	Auther utils.UserAuther //为了在服务端能确认一串数据确实是有效的uuid，需要使用 UserHaser
+	Auther utils.UserAuthenticator //为了在服务端能确认一串数据确实是有效的uuid，需要使用 UserHaser
 
 	SniffedServerName string
 
@@ -344,7 +343,7 @@ func (cd *ComSniff) CommonDetect(p []byte, isRead bool, onlyForSni bool) {
 
 		var helloValue byte = 1
 
-		//我们 DetectConn中，考察客户端浏览器传输来的流量 时 使用 Read， 考察远程真实服务端发来的流量 时 使用Write;
+		//我们 SniffConn 中，考察客户端浏览器传输来的流量 时 使用 Read， 考察远程真实服务端发来的流量 时 使用Write;
 		// 无论 代理程序的客户端还是 代理程序的服务端都是如此
 
 		if !isRead {
@@ -594,9 +593,6 @@ func (dw *DetectLazyWriter) SimpleWrite(p []byte) (n int, err error) {
 	return
 }
 
-//用于通知 “我们要开始tls数据部分啦” 的 “特殊指令”，该指令会被tls加密发送，因此不用担心暴露
-//var SpecialCommand = []byte{1, 2, 3, 4}	//后来决定直接使用uuid作为特殊指令。也是加密传输的，所以安全性一样。和普通vless+tls一样，最怕的是中间人攻击。只要自己证书申请好就行。
-
 //发现，数据基本就是 23 3 3， 22 3 3，22 3 1 ， 20 3 3
 //一个首包不为23 3 3 的包往往会出现在 1184长度的包的后面，而且一般 1184长度的包 的开头是 22 3 3 0 122，且总是在Write里面发生.
 //所以可以直接推测这个就是握手包; 实测 22 3 3 0 122 开头的，无一例外都是 1184长度，且后面接多个 开头任意的 Write
@@ -622,7 +618,7 @@ func (dw *DetectLazyWriter) Write(p []byte) (n int, err error) {
 	if dw.IsTls {
 
 		if dw.Isclient {
-			// 客户端 DetectConn的Write被调用的话，那就是从 服务端的 tls连接中 提取出了新数据，准备通过socks5发往浏览器
+			// 客户端 SniffConn 的Write被调用的话，那就是从 服务端的 tls连接中 提取出了新数据，准备通过socks5发往浏览器
 			//
 			//客户端判断出IsTLS，那就是收到了特殊指令，p的头部就是特殊指令；p后面可能还跟 数据
 			//  然而，一旦后面跟了数据，就完蛋了，这说明特殊指令 和 直连数据连在一起 整个被tls处理 了

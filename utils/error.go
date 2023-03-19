@@ -5,10 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 var (
-	ErrNotImplemented      = errors.New("not implemented")
+	ErrUnImplemented       = errors.New("not implemented")
 	ErrNilParameter        = errors.New("nil parameter")
 	ErrNilOrWrongParameter = errors.New("nil or wrong parameter")
 	ErrWrongParameter      = errors.New("wrong parameter")
@@ -16,14 +17,16 @@ var (
 	ErrNoMatch             = errors.New("no matched")
 	ErrInvalidNumber       = errors.New("invalid number")
 
-	ErrShortRead = errors.New("short read")
+	ErrInvalidWrite = errors.New("readfrom, invalid write result")
+
+	ErrShortRead = errors.New("short read") //io包有ErrShortWrite，却没有ShortRead
 	ErrHandled   = errors.New("handled")
 	ErrFailed    = errors.New("failed") //最无脑的Err, 在能描述清楚错误时不要使用 ErrFailed
 )
 
 type InvalidDataErr string
 
-//return err == e || err == ErrInvalidData
+// return err == e || err == ErrInvalidData
 func (e InvalidDataErr) Is(err error) bool {
 	return err == e || err == ErrInvalidData
 }
@@ -32,7 +35,7 @@ func (e InvalidDataErr) Error() string {
 	return string(e)
 }
 
-//nothing special. Normally, N==0 means no error
+// nothing special. Normally, N==0 means no error
 type NumErr struct {
 	N int
 	E error
@@ -52,7 +55,7 @@ func (ef NumErr) Unwarp() error {
 	return ef.E
 }
 
-//nothing special
+// nothing special
 type NumStrErr struct {
 	N      int
 	Prefix string
@@ -63,7 +66,7 @@ func (ne NumStrErr) Error() string {
 	return ne.Prefix + strconv.Itoa(ne.N)
 }
 
-//an err with a buffer, nothing special
+// an err with a buffer, nothing special
 type ErrBuffer struct {
 	Err error
 	Buf *bytes.Buffer
@@ -81,10 +84,16 @@ func (ef ErrBuffer) Unwarp() error {
 
 func (ef ErrBuffer) Error() string {
 
-	return ef.Err.Error() + ", with Buffer."
+	if ef.Buf != nil {
+		return ef.Err.Error() + ", with Buffer,len " + strconv.Itoa(ef.Buf.Len())
+
+	} else {
+		return ef.Err.Error() + ", with nil Buffer."
+
+	}
 }
 
-// ErrInErr 很适合一个err包含另一个err，并且提供附带数据的情况. 类似 fmt.Errorf
+// ErrInErr 很适合一个err包含另一个err，并且提供附带数据的情况. 类似 fmt.Errorf.
 type ErrInErr struct {
 	ErrDesc   string
 	ErrDetail error
@@ -134,4 +143,52 @@ func (e ErrInErr) String() string {
 
 	return e.ErrDesc
 
+}
+
+type ErrList struct {
+	List []ErrItem
+}
+
+type ErrItem struct {
+	Index int
+	E     error
+}
+
+func (ee *ErrList) Add(e ErrItem) {
+	ee.List = append(ee.List, e)
+}
+func (e ErrList) OK() bool {
+	return len(e.List) == 0
+}
+func (e ErrList) String() string {
+	var sb strings.Builder
+	for _, err := range e.List {
+		sb.WriteString(strconv.Itoa(err.Index))
+		sb.WriteString(", ")
+		if err.E != nil {
+			sb.WriteString(err.E.Error())
+		}
+		sb.WriteString("\n")
+
+	}
+	return sb.String()
+}
+
+func (e ErrList) Error() string {
+	return e.String()
+}
+
+func (e ErrList) Is(target error) bool {
+	for _, ee := range e.List {
+		if ee.E == nil {
+			continue
+		}
+		if ee.E == target {
+			return true
+		} else if errors.Is(ee.E, target) {
+			return true
+		}
+	}
+
+	return false
 }

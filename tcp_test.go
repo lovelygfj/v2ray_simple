@@ -3,7 +3,7 @@ package v2ray_simple_test
 import (
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"testing"
@@ -12,6 +12,17 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/proxy"
 	"github.com/e1732a364fed/v2ray_simple/utils"
+
+	_ "github.com/e1732a364fed/v2ray_simple/advLayer/grpcSimple"
+	_ "github.com/e1732a364fed/v2ray_simple/advLayer/ws"
+
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/dokodemo"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/shadowsocks"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/simplesocks"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/socks5http"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/trojan"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/vless"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/vmess"
 )
 
 func TestTCP_vless(t *testing.T) {
@@ -26,7 +37,7 @@ func TestTCP_trojan_mux(t *testing.T) {
 	testTCP(t, "trojan", 0, "tcp", true)
 }
 
-//tcp测试我们直接使用http请求来测试
+// tcp测试我们直接使用http请求来测试
 func testTCP(t *testing.T, protocol string, version int, network string, innermux bool) {
 	utils.LogLevel = utils.Log_debug
 	utils.InitLog("")
@@ -76,12 +87,12 @@ protocol = "direct"
 
 	testServerConfStr := fmt.Sprintf(testServerConfFormatStr, protocol, clientDialPort, version, network)
 
-	clientConf, err := proxy.LoadTomlConfStr(testClientConfStr)
+	clientConf, err := proxy.LoadStandardConfFromTomlStr(testClientConfStr)
 	if err != nil {
 		t.Log(err)
 		t.FailNow()
 	}
-	serverConf, err := proxy.LoadTomlConfStr(testServerConfStr)
+	serverConf, err := proxy.LoadStandardConfFromTomlStr(testServerConfStr)
 	if err != nil {
 		t.Log(err)
 		t.FailNow()
@@ -116,8 +127,8 @@ protocol = "direct"
 		t.FailNow()
 	}
 
-	c1 := v2ray_simple.ListenSer(clientEndInServer, clientEndOutClient, nil)
-	c2 := v2ray_simple.ListenSer(serverEndInServer, serverEndOutClient, nil)
+	c1 := v2ray_simple.ListenSer(clientEndInServer, clientEndOutClient, nil, nil)
+	c2 := v2ray_simple.ListenSer(serverEndInServer, serverEndOutClient, nil, nil)
 	if c1 != nil {
 		defer c1.Close()
 	}
@@ -157,7 +168,7 @@ func tryGetHttp(t *testing.T, client *http.Client, path string) {
 
 	t.Log("Got response, start read")
 
-	bs, err := ioutil.ReadAll(resp.Body)
+	bs, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Log("get http failed read", err)
 		t.FailNow()

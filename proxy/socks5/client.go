@@ -1,6 +1,7 @@
 package socks5
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/url"
@@ -14,17 +15,31 @@ func init() {
 	proxy.RegisterClient(Name, &ClientCreator{})
 }
 
-type ClientCreator struct{}
+type ClientCreator struct{ proxy.CreatorCommonStruct }
 
-func (ClientCreator) NewClientFromURL(u *url.URL) (proxy.Client, error) {
-	c := &Client{}
-	c.InitWithUrl(u)
-	return c, nil
+// true
+func (ClientCreator) MultiTransportLayer() bool {
+	return true
+}
+func (ClientCreator) URLToDialConf(u *url.URL, dc *proxy.DialConf, format int) (*proxy.DialConf, error) {
+
+	if format != proxy.UrlStandardFormat {
+		return dc, utils.ErrUnImplemented
+	}
+	if dc == nil {
+		dc = &proxy.DialConf{}
+	}
+
+	if p, set := u.User.Password(); set {
+		dc.UUID = "user:" + u.User.Username() + "\npass:" + p
+	}
+
+	return dc, nil
 }
 
 func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
 	c := &Client{}
-	if str := dc.Uuid; str != "" {
+	if str := dc.UUID; str != "" {
 		c.InitWithStr(str)
 	}
 	return c, nil
@@ -35,12 +50,14 @@ type Client struct {
 	utils.UserPass
 }
 
+func (*Client) GetCreator() proxy.ClientCreator {
+	return ClientCreator{}
+}
 func (*Client) Name() string {
 	return Name
 }
 
 func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLayer.Addr) (result io.ReadWriteCloser, err error) {
-
 	if underlay == nil {
 		panic("socks5 client handshake, nil underlay is not allowed")
 	}
@@ -66,7 +83,7 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 		return
 	}
 
-	proxy.SetCommonReadTimeout(underlay)
+	netLayer.SetCommonReadTimeout(underlay)
 
 	n, err := underlay.Read(ba[:])
 	if err != nil {
@@ -90,7 +107,7 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 		if err != nil {
 			return nil, err
 		}
-		proxy.SetCommonReadTimeout(underlay)
+		netLayer.SetCommonReadTimeout(underlay)
 
 		n, err = underlay.Read(ba[:])
 		if err != nil {
@@ -120,15 +137,18 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 		return
 	}
 
-	proxy.SetCommonReadTimeout(underlay)
-	n, err = underlay.Read(ba[:])
+	netLayer.SetCommonReadTimeout(underlay)
+	var bigBs = utils.GetBytes(100)
+	defer utils.PutBytes(bigBs)
+
+	n, err = underlay.Read(bigBs)
 
 	if err != nil {
 		return
 	}
 	netLayer.PersistConn(underlay)
 
-	if n < 10 || ba[0] != 5 || ba[1] != 0 || ba[2] != 0 {
+	if n < 10 || bigBs[0] != 5 || bigBs[1] != 0 || bigBs[2] != 0 {
 		return nil, utils.NumStrErr{Prefix: "socks5 client handshake failed when reading response", N: 2}
 
 	}
@@ -142,6 +162,11 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 }
 
 func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, target netLayer.Addr) (netLayer.MsgConn, error) {
+
+	if c.Network() == "tcp" {
+		return nil, errors.New("direct's network set to tcp, but EstablishUDPChannel called")
+	}
+
 	var err error
 	serverPort := 0
 	serverPort, err = Client_EstablishUDPAssociate(underlay)
@@ -153,6 +178,12 @@ func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, tar
 	if err != nil {
 		return nil, err
 	}
+
+	ua = &net.UDPAddr{
+		IP:   ua.IP,
+		Port: serverPort,
+	}
+
 	cpc := ClientUDPConn{
 		associated:          true,
 		ServerUDPPort_forMe: serverPort,
@@ -170,6 +201,6 @@ func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, tar
 		return &cpc, nil
 
 	} else {
-		return &cpc, cpc.WriteMsgTo(firstPayload, target)
+		return &cpc, cpc.WriteMsg(firstPayload, target)
 	}
 }

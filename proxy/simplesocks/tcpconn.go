@@ -8,15 +8,80 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
+// 实现 utils.User, utils.UserAssigner
 type TCPConn struct {
 	net.Conn
-	optionalReader io.Reader //在使用了缓存读取握手包头后，就产生了buffer中有剩余数据的可能性，此时就要使用MultiReader
+	optionalReader io.Reader
 
 	remainFirstBufLen int //记录读取握手包头时读到的buf的长度. 如果我们读超过了这个部分的话,实际上我们就可以不再使用 optionalReader 读取, 而是直接从Conn读取
 
 	underlayIsBasic bool
 
 	isServerEnd bool
+
+	upstreamUser utils.User
+}
+
+// 实现 utils.UserAssigner
+func (c *TCPConn) SetUser(u utils.User) {
+	c.upstreamUser = u
+}
+
+func (c *TCPConn) IdentityStr() string {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.IdentityStr()
+	}
+	return ""
+}
+
+func (c *TCPConn) IdentityBytes() []byte {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.IdentityBytes()
+	}
+	return nil
+}
+
+func (c *TCPConn) AuthStr() string {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.AuthStr()
+	}
+	return ""
+}
+func (c *TCPConn) AuthBytes() []byte {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.AuthBytes()
+	}
+	return nil
+}
+
+func (c *TCPConn) Upstream() net.Conn {
+	return c.Conn
+}
+
+// 当底层链接可以暴露为 tcp或 unix链接时，返回true
+func (c *TCPConn) EverPossibleToSpliceRead() bool {
+	if netLayer.IsTCP(c.Conn) != nil {
+		return true
+	}
+	if netLayer.IsUnix(c.Conn) != nil {
+		return true
+	}
+
+	if s, ok := c.Conn.(netLayer.SpliceReader); ok {
+		return s.EverPossibleToSpliceRead()
+	}
+
+	return false
+}
+
+func (c *TCPConn) CanSpliceRead() (bool, *net.TCPConn, *net.UnixConn) {
+	if c.isServerEnd {
+		if c.remainFirstBufLen > 0 {
+			return false, nil, nil
+		}
+	}
+
+	return netLayer.ReturnSpliceRead(c.Conn)
 }
 
 func (c *TCPConn) Read(p []byte) (int, error) {
@@ -34,28 +99,28 @@ func (c *TCPConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-func (c *TCPConn) EverPossibleToSplice() bool {
+func (c *TCPConn) EverPossibleToSpliceWrite() bool {
 
-	if netLayer.IsBasicConn(c.Conn) {
+	if netLayer.IsTCP(c.Conn) != nil {
 		return true
 	}
 	if s, ok := c.Conn.(netLayer.Splicer); ok {
-		return s.EverPossibleToSplice()
+		return s.EverPossibleToSpliceWrite()
 	}
 	return false
 }
 
-func (c *TCPConn) CanSplice() (r bool, conn net.Conn) {
+func (c *TCPConn) CanSpliceWrite() (r bool, conn *net.TCPConn) {
 	if !c.isServerEnd && c.remainFirstBufLen > 0 {
 		return false, nil
 	}
 
-	if netLayer.IsBasicConn(c.Conn) {
+	if tc := netLayer.IsTCP(c.Conn); tc != nil {
 		r = true
-		conn = c.Conn
+		conn = tc
 
 	} else if s, ok := c.Conn.(netLayer.Splicer); ok {
-		r, conn = s.CanSplice()
+		r, conn = s.CanSpliceWrite()
 	}
 
 	return

@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/e1732a364fed/v2ray_simple/utils"
@@ -22,7 +23,7 @@ const (
 	AtypIP6    byte = 3
 )
 
-//默认netLayer的 AType (AtypIP4,AtypIP6,AtypDomain) 遵循v2ray标准的定义;
+// 默认netLayer的 AType (AtypIP4,AtypIP6,AtypDomain) 遵循v2ray标准的定义;
 // 如果需要符合 socks5/trojan标准, 需要用本函数转换一下。
 // 即从 123 转换到 134
 func ATypeToSocks5Standard(atype byte) byte {
@@ -62,7 +63,7 @@ func init() {
 	}
 }
 
-//if mustValid is true, a valid port is assured.
+// if mustValid is true, a valid port is assured.
 // isudp is used to determine whether you want to use udp.
 // depth 填0 即可，用于递归。
 func RandPort(mustValid, isudp bool, depth int) (p int) {
@@ -127,6 +128,12 @@ func RandPort(mustValid, isudp bool, depth int) (p int) {
 	return
 }
 
+// use a new seed each time called
+func RandPortStr_safe(mustValid, isudp bool) string {
+	rand.Seed(time.Now().UnixNano())
+	return strconv.Itoa(RandPort(mustValid, isudp, 0))
+}
+
 func RandPortStr(mustValid, isudp bool) string {
 	return strconv.Itoa(RandPort(mustValid, isudp, 0))
 }
@@ -159,7 +166,7 @@ func NewAddrFromTCPAddr(addr *net.TCPAddr) Addr {
 	}
 }
 
-//addrStr格式一般为 host:port ；如果不含冒号，将直接认为该字符串是域名或文件名
+// addrStr格式一般为 host:port ；如果不含冒号，将直接认为该字符串是域名或文件名
 func NewAddr(addrStr string) (Addr, error) {
 	if !strings.Contains(addrStr, ":") {
 		//unix domain socket, or 域名默认端口的情况
@@ -169,7 +176,7 @@ func NewAddr(addrStr string) (Addr, error) {
 	return NewAddrByHostPort(addrStr)
 }
 
-//hostPortStr格式 必须为 host:port，本函数不对此检查
+// hostPortStr格式 必须为 host:port，本函数不对此检查
 func NewAddrByHostPort(hostPortStr string) (Addr, error) {
 	host, portStr, err := net.SplitHostPort(hostPortStr)
 	if err != nil {
@@ -194,43 +201,63 @@ func NewAddrByHostPort(hostPortStr string) (Addr, error) {
 }
 
 // 如 tcp://127.0.0.1:443 , tcp://google.com:443 ;
-// 不支持unix domain socket, 因为它是文件路径, / 还需要转义，太麻烦;不是我们代码麻烦, 而是怕用户嫌麻烦
+// 不使用转义的方式, 不使用url包，直接用分割字符串的办法。
+// 会把 [xxx] 格式的字符串当作 ipv6地址, 去掉中括号并试图解析
 func NewAddrByURL(addrStr string) (Addr, error) {
+	indexOfColonSlash := strings.Index(addrStr, "://")
 
-	u, err := url.Parse(addrStr)
-	if err != nil {
-		return Addr{}, err
+	if indexOfColonSlash < 0 {
+		return Addr{}, errors.New("not a url")
 	}
-	if u.Scheme == "unix" {
-		return Addr{}, errors.New("parse unix domain socket by url is not supported")
-	}
-	addrStr = u.Host
 
-	host, portStr, err := net.SplitHostPort(addrStr)
-	if err != nil {
-		return Addr{}, err
+	realindex := indexOfColonSlash + 3
+	network := addrStr[:indexOfColonSlash]
+
+	addrStr = addrStr[realindex:]
+
+	lastColonIndex := strings.LastIndex(addrStr, ":")
+	noPortField := NetworkHasNoPortField(network)
+	if lastColonIndex == -1 {
+		if !noPortField {
+			return Addr{}, errors.New("unsupported url, no colon")
+
+		} else {
+			lastColonIndex = len(addrStr)
+		}
 	}
+	host := addrStr[:lastColonIndex]
+	var port int
+	var err error
+
+	if !noPortField {
+		portStr := addrStr[lastColonIndex+1:]
+
+		port, err = strconv.Atoi(portStr)
+		if err != nil {
+			return Addr{}, err
+		}
+	}
+
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return Addr{}, err
-	}
+	a := Addr{Port: port, Network: network}
 
-	a := Addr{Port: port}
+	//[::1]
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimLeft(host, "[")
+		host = strings.TrimRight(host, "]")
+	}
 	if ip := net.ParseIP(host); ip != nil {
 		a.IP = ip
 	} else {
 		a.Name = host
 	}
 
-	a.Network = u.Scheme
-
 	return a, nil
 }
 
-//会根据thing的类型 生成实际addr； 可以为数字端口, 或 类似tcp://ip:port的url, 或ip:port字符串，或一个 文件路径(unix domain socket), or *net.TCPAddr / *net.UDPAddr / net.Addr
+// 会根据thing的类型 生成实际addr； 可以为数字端口, 或 类似tcp://ip:port的url, 或ip:port字符串，或一个 文件路径(unix domain socket), or *net.TCPAddr / *net.UDPAddr / net.Addr
 func NewAddrFromAny(thing any) (addr Addr, err error) {
 	var integer int
 	var dest_type byte = 0 //0: port, 1: ip:port, 2: unix domain socket
@@ -240,14 +267,14 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 	case float64: //json 默认把数字转换成float64，就算是整数也一样
 
 		if value > 65535 || value < 0 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 
 		integer = int(value)
 	case float32:
 		if value > 65535 || value < 0 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 
@@ -255,13 +282,13 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 	case int64: //toml包 默认把整数转换成int64
 
 		if value > 65535 || value < 0 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 		integer = int(value)
 	case int:
 		if value > 65535 || value < 0 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 
@@ -269,7 +296,7 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 	case int32:
 
 		if value > 65535 || value < 0 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 		integer = int(value)
@@ -281,20 +308,20 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 	case uint64:
 
 		if value > 65535 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 		integer = int(value)
 	case uint:
 
 		if value > 65535 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 		integer = int(value)
 	case uint32:
 		if value > 65535 {
-			err = utils.ErrInErr{ErrDesc: "port not valid", Data: value}
+			err = utils.ErrInErr{ErrDesc: "Invalid port", Data: value}
 			return
 		}
 		integer = int(value)
@@ -304,6 +331,10 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 		integer = int(value)
 
 	case string:
+		if value == "" {
+			err = utils.ErrInErr{ErrDetail: utils.ErrNilParameter, ErrDesc: "empty string given"}
+			return
+		}
 		//先判断是不是url
 		addr, err = NewAddrByURL(value)
 		if err == nil {
@@ -340,12 +371,12 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 		return
 
 	default:
-		err = utils.ErrInErr{ErrDesc: "Fallback dest config type err", Data: reflect.TypeOf(thing)}
+		err = utils.ErrInErr{ErrDesc: "Failed in Fallback dest config type", Data: reflect.TypeOf(thing)}
 		return
 	}
 
 	switch dest_type {
-	case 0: //只给出数字的情况, 认为该数字为端口, ip为本机。
+	case 0: //只给出数字的情况; 此时我们认为 该数字为端口、 ip为本机。
 		addr = Addr{
 			IP:   net.IPv4(127, 0, 0, 1),
 			Port: integer,
@@ -353,7 +384,7 @@ func NewAddrFromAny(thing any) (addr Addr, err error) {
 	case 1:
 		addr, err = NewAddrByHostPort(dest_string)
 		if err != nil {
-			err = utils.ErrInErr{ErrDesc: "addr create with given string failed", ErrDetail: err, Data: dest_string}
+			err = utils.ErrInErr{ErrDesc: "Failed in addr create with given string", ErrDetail: err, Data: dest_string}
 			return
 		}
 	case 2:
@@ -389,15 +420,35 @@ func (a *Addr) String() string {
 		if a.IP == nil {
 			return net.JoinHostPort(a.Name, port)
 		}
+
 		return net.JoinHostPort(a.IP.String(), port)
 	}
 
 }
 
-//返回以url表示的 地址. unix的话文件名若带斜杠则会被转义
+// 返回以url表示的 地址. unix的话会被url转义。ipv6的中括号不会被转义
 func (a *Addr) UrlString() string {
 	if a.Network != "" {
-		return a.Network + "://" + url.PathEscape(a.String())
+		if a.Network == "unix" {
+			return a.Network + "://" + url.PathEscape(a.String())
+
+		} else {
+			return a.Network + "://" + a.String()
+
+		}
+
+	} else {
+		return "tcp://" + a.String()
+
+	}
+
+}
+
+// 返回以url表示的 地址.不转义
+func (a *Addr) RawUrlString() string {
+	if a.Network != "" {
+
+		return a.Network + "://" + a.String()
 
 	} else {
 		return "tcp://" + a.String()
@@ -424,13 +475,35 @@ func (a *Addr) GetNetIPAddr() (na netip.Addr) {
 	return
 }
 
-//a.Network == "udp", "udp4", "udp6"
+// IsStrUDP_network(a.Network)
 func (a *Addr) IsUDP() bool {
 	return IsStrUDP_network(a.Network)
 }
 
-//如果a里只含有域名，则会自动解析域名为IP。
+func (a *Addr) ToAddr() net.Addr {
+	n := a.Network
+	if n == "" {
+		n = "tcp"
+	}
+	switch StrToTransportProtocol(a.Network) {
+	case TCP:
+		return a.ToTCPAddr()
+	case UDP:
+		return a.ToUDPAddr()
+	case UNIX:
+		u, _ := net.ResolveUnixAddr("unix", a.Name)
+		return u
+	case IP:
+		return &net.IPAddr{IP: a.IP, Zone: a.Name}
+	}
+	return nil
+}
+
+// 如果a里只含有域名，则会自动解析域名为IP。注意，若出现错误，则会返回nil
 func (a *Addr) ToUDPAddr() *net.UDPAddr {
+	if a.IsEmpty() {
+		return nil
+	}
 	ua, err := net.ResolveUDPAddr("udp", a.String())
 	if err != nil {
 		return nil
@@ -446,7 +519,7 @@ func (a *Addr) ToTCPAddr() *net.TCPAddr {
 	return ta
 }
 
-// Returned host string
+// if a.IP!=nil, return IP.String() else return a.Name
 func (a *Addr) HostStr() string {
 	if a.IP == nil {
 		return a.Name
@@ -484,8 +557,9 @@ func (a *Addr) AddressBytes() (addr []byte, atyp byte) {
 }
 
 // ParseAddr 分析字符串，并按照特定方式返回 地址类型 atyp,地址数据 addr []byte,以及端口号,
-//   如果解析出的地址是ip，则 addr返回 net.IP;
-//  如果解析出的地址是 域名，则第一字节为域名总长度, 剩余字节为域名内容
+//
+//	 如果解析出的地址是ip，则 addr返回 net.IP;
+//	如果解析出的地址是 域名，则第一字节为域名总长度, 剩余字节为域名内容
 func ParseStrToAddr(s string) (atyp byte, addr []byte, port_uint16 uint16, err error) {
 
 	var host string
@@ -504,7 +578,7 @@ func ParseStrToAddr(s string) (atyp byte, addr []byte, port_uint16 uint16, err e
 		} else {
 			addr = make([]byte, net.IPv6len)
 			atyp = AtypIP6
-			copy(addr[:], ip)
+			copy(addr, ip)
 		}
 	} else {
 		if len(host) > 255 {
@@ -548,7 +622,7 @@ func UDPAddr2AddrPort(ua *net.UDPAddr) netip.AddrPort {
 	return netip.AddrPortFrom(a, uint16(ua.Port))
 }
 
-//依照 vmess/vless 协议的格式 依次读取 地址的 port, 域名/ip 信息
+// 依照 vmess/vless 协议的格式 依次读取 地址的 port, 域名/ip 信息
 func V2rayGetAddrFrom(buf utils.ByteReader) (addr Addr, err error) {
 
 	pb1, err := buf.ReadByte()
@@ -584,7 +658,7 @@ func V2rayGetAddrFrom(buf utils.ByteReader) (addr Addr, err error) {
 		}
 
 		if b2 == 0 {
-			err = errors.New("got ATypDomain but domain lenth is marked to be 0")
+			err = errors.New("got ATypDomain with domain lenth marked as 0")
 			return
 		}
 
@@ -621,7 +695,7 @@ func V2rayGetAddrFrom(buf utils.ByteReader) (addr Addr, err error) {
 		if err != nil {
 			return
 		}
-		if n != 4 {
+		if n != net.IPv6len {
 			err = utils.ErrShortRead
 			return
 		}
@@ -632,4 +706,78 @@ func V2rayGetAddrFrom(buf utils.ByteReader) (addr Addr, err error) {
 	}
 
 	return
+}
+
+const DualNetworkName = "dual"
+
+type TCPUDPAddr struct {
+	*net.TCPAddr
+	*net.UDPAddr
+}
+
+func (tu *TCPUDPAddr) Network() string {
+	return DualNetworkName
+}
+func (tu *TCPUDPAddr) String() string {
+	return tu.TCPAddr.String() + " / " + tu.UDPAddr.String()
+}
+
+func StrToNetAddr(network, s string) (net.Addr, error) {
+	if network == "" {
+		network = "tcp"
+	}
+	realNet := StrToTransportProtocol(network)
+	switch realNet {
+	case IP:
+		return net.ResolveIPAddr(network, s)
+	case TCP:
+		if !strings.Contains(s, ":") {
+			s += ":0"
+		}
+		return net.ResolveTCPAddr(network, s)
+
+	case UDP:
+		if !strings.Contains(s, ":") {
+			s += ":0"
+		}
+		return net.ResolveUDPAddr(network, s)
+
+	case Dual:
+		//两种配置方式，一种是给出一个地址，tcp和udp均使用该地址；
+		// 另一种是 分别指出 两种协议的 地址.
+
+		if strings.HasPrefix(s, "tcp:") { //tcp:127.0.0.1:80\nudp:127.0.0.1:12345
+
+			ok, t, u := utils.CommonSplit(s, "tcp", "udp")
+
+			if ok {
+				return makeTcpUdpAddr(t, u)
+			} else {
+				return nil, utils.ErrInvalidData
+
+			}
+
+		} else {
+			return makeTcpUdpAddr(s, s)
+		}
+
+	case UNIX:
+		return net.ResolveUnixAddr(network, s)
+	default:
+		return nil, utils.ErrWrongParameter
+	}
+}
+
+func makeTcpUdpAddr(t, u string) (*TCPUDPAddr, error) {
+	ta, e := StrToNetAddr("tcp", t)
+	if e != nil {
+		return nil, e
+	}
+
+	ua, e := StrToNetAddr("udp", u)
+	if e != nil {
+		return nil, e
+	}
+
+	return &TCPUDPAddr{TCPAddr: ta.(*net.TCPAddr), UDPAddr: ua.(*net.UDPAddr)}, nil
 }

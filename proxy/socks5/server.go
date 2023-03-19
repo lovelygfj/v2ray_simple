@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/utils"
+	"go.uber.org/zap"
 
 	"github.com/e1732a364fed/v2ray_simple/proxy"
 )
 
 // 解读如下：
-//ver（5）, rep（0，表示成功）, rsv（0）, atyp(1, 即ipv4), BND.ADDR （ipv4(0,0,0,0)）, BND.PORT(0, 2字节)
-//这个 BND.ADDR和port 按理说不应该传0的，不过如果只作为本地tcp代理的话应该不影响
+// ver（5）, rep（0，表示成功）, rsv（0）, atyp(1, 即ipv4), BND.ADDR （ipv4(0,0,0,0)）, BND.PORT(0, 2字节)
+// 这个 BND.ADDR和port 按理说不应该传0的，不过如果只作为本地tcp代理的话应该不影响
 var commmonTCP_HandshakeReply = []byte{Version5, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 
 func init() {
@@ -37,21 +39,36 @@ func NewServer() *Server {
 	return s
 }
 
-type ServerCreator struct{}
+type ServerCreator struct{ proxy.CreatorCommonStruct }
 
-func (ServerCreator) NewServerFromURL(u *url.URL) (proxy.Server, error) {
-	s := NewServer()
-	var userPass utils.UserPass
-	if userPass.InitWithUrl(u) {
-		s.AddUser(&userPass)
+// true
+func (ServerCreator) MultiTransportLayer() bool {
+	return true
+}
+func (ServerCreator) URLToListenConf(u *url.URL, lc *proxy.ListenConf, format int) (*proxy.ListenConf, error) {
+
+	if format != proxy.UrlStandardFormat {
+		return lc, utils.ErrUnImplemented
+	}
+	if lc == nil {
+		lc = &proxy.ListenConf{}
 	}
 
-	return s, nil
+	if p, set := u.User.Password(); set {
+		user := u.User.Username()
+		pass := p
+		lc.Users = append(lc.Users, utils.UserConf{
+			User: user,
+			Pass: pass,
+		})
+	}
+
+	return lc, nil
 }
 
 func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 	s := NewServer()
-	if str := lc.Uuid; str != "" {
+	if str := lc.UUID; str != "" {
 
 		var userPass utils.UserPass
 		if userPass.InitWithStr(str) {
@@ -74,7 +91,7 @@ func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 
 func (*Server) Name() string { return Name }
 
-//若没有IDMap，则直接写入AuthNone响应，否则返回错误
+// 若没有IDMap，则直接写入AuthNone响应，否则返回错误
 func (s *Server) authNone(underlay net.Conn) (returnErr error) {
 	var err error
 	if len(s.IDMap) == 0 {
@@ -93,7 +110,7 @@ func (s *Server) authNone(underlay net.Conn) (returnErr error) {
 // 处理tcp收到的请求. 注意, udp associate后的 udp请求并不 直接 通过此函数处理, 而是由 UDPConn 处理
 func (s *Server) Handshake(underlay net.Conn) (result net.Conn, udpChannel netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
 	if !s.TrustClient {
-		if err := proxy.SetCommonReadTimeout(underlay); err != nil {
+		if err := netLayer.SetCommonReadTimeout(underlay); err != nil {
 			returnErr = err
 			return
 		}
@@ -177,7 +194,7 @@ For:
 
 			if n == 2+nmethods {
 				if !s.TrustClient {
-					if err := proxy.SetCommonReadTimeout(underlay); err != nil {
+					if err := netLayer.SetCommonReadTimeout(underlay); err != nil {
 						returnErr = err
 						return
 					}
@@ -247,7 +264,7 @@ For:
 	}
 
 	if !s.TrustClient {
-		if err := proxy.SetCommonReadTimeout(underlay); err != nil {
+		if err := netLayer.SetCommonReadTimeout(underlay); err != nil {
 			returnErr = err
 			return
 		}
@@ -321,7 +338,12 @@ For:
 
 	if cmd == CmdUDPAssociate {
 
-		utils.Debug("socks5 got CmdUDPAssociate")
+		//utils.Debug("socks5 got CmdUDPAssociate")
+
+		if s.Network() == "tcp" {
+			returnErr = errors.New("socks5's network set to tcp, but got CmdUDPAssociate from client")
+			return
+		}
 
 		//这里我们serverAddr直接返回0.0.0.0即可，也实在想不到谁会返回 另一个ip地址出来。肯定应该和原ip相同的。
 
@@ -383,9 +405,10 @@ For:
 		}
 
 		targetAddr = netLayer.Addr{
-			IP:   theIP,
-			Name: theName,
-			Port: thePort,
+			IP:      theIP,
+			Name:    theName,
+			Port:    thePort,
+			Network: "tcp",
 		}
 
 		return underlay, nil, targetAddr, nil
@@ -393,7 +416,7 @@ For:
 
 }
 
-//用于socks5服务端的 udp连接, 实现 netLayer.MsgConn
+// 用于socks5服务端的 udp连接, 实现 netLayer.MsgConn
 type ServerUDPConn struct {
 	*net.UDPConn
 	clientSupposedAddr *net.UDPAddr //客户端指定的客户端自己未来将使用的公网UDP的Addr
@@ -408,8 +431,8 @@ func (u *ServerUDPConn) Fullcone() bool {
 	return u.fullcone
 }
 
-//将远程地址发来的响应 传给客户端
-func (u *ServerUDPConn) WriteMsgTo(bs []byte, raddr netLayer.Addr) error {
+// 将远程地址发来的响应 传给客户端
+func (u *ServerUDPConn) WriteMsg(bs []byte, raddr netLayer.Addr) error {
 
 	buf := &bytes.Buffer{}
 	buf.WriteByte(0) //rsv
@@ -434,16 +457,23 @@ func (u *ServerUDPConn) WriteMsgTo(bs []byte, raddr netLayer.Addr) error {
 
 }
 
-//从 客户端读取 udp请求
-func (u *ServerUDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
+// 从 客户端读取 udp请求
+func (u *ServerUDPConn) ReadMsg() ([]byte, netLayer.Addr, error) {
 
 	var clientSupposedAddrIsNothing bool
-	if len(u.clientSupposedAddr.IP) < 3 || u.clientSupposedAddr.IP.IsUnspecified() {
+	if u.clientSupposedAddr == nil || len(u.clientSupposedAddr.IP) < 3 || u.clientSupposedAddr.IP.IsUnspecified() {
 		clientSupposedAddrIsNothing = true
 	}
 
 	bs := utils.GetPacket()
 
+	if u.fullcone {
+		u.UDPConn.SetReadDeadline(time.Now().Add(netLayer.UDP_fullcone_timeout))
+
+	} else {
+		u.UDPConn.SetReadDeadline(time.Now().Add(netLayer.UDP_timeout))
+
+	}
 	n, addr, err := u.UDPConn.ReadFromUDP(bs)
 	if err != nil {
 
@@ -462,15 +492,28 @@ func (u *ServerUDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
 
 		if !addr.IP.Equal(u.clientSupposedAddr.IP) || addr.Port != u.clientSupposedAddr.Port {
 
-			//just random attack message.
-			return nil, netLayer.Addr{}, utils.ErrInErr{ErrDesc: "socks5 UDPConn ReadMsg failed, addr not coming from supposed client addr", ErrDetail: utils.ErrInvalidData, Data: addr.String()}
+			//just random attack message,
+
+			//但是有些其他socks5客户端确实会导致这个问题，所以不应直接退出; 见issue 157
+			// socks5 本 不应 用在公网，更不应在公网开启udp转发。所以这里给一个warning已经足够。
+
+			if ce := utils.CanLogWarn("socks5 got udp from a different source rather than the expected one"); ce != nil {
+				ce.Write(
+					zap.String("expected", u.clientSupposedAddr.String()),
+					zap.String("real", addr.String()),
+				)
+			}
+
+			clientSupposedAddrIsNothing = true
+
+			//return nil, netLayer.Addr{}, utils.ErrInErr{ErrDesc: "socks5 UDPConn ReadMsg failed, addr not coming from supposed client addr", ErrDetail: utils.ErrInvalidData, Data: addr.String()}
 
 		}
 	}
 
 	atyp := bs[3]
 
-	l := 2   //supposed Minimum Remain Data Lenth
+	l := 2   //supposed Minimum Remain Data Lenth, 包含Port的2字节
 	off := 4 //offset from which the addr data really starts
 
 	var theIP net.IP

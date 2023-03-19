@@ -8,12 +8,7 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-const (
-	official = iota
-	utlsPackage
-)
-
-//参考 crypt/tls 的 conn.go， 注意，如果上游代码的底层结构发生了改变，则这里也要跟着修改，保持头部结构一致
+// 参考 crypt/tls 的 conn.go， 注意，如果上游代码的底层结构发生了改变，则这里也要跟着修改，保持头部结构一致
 type faketlsconn struct {
 	conn     net.Conn
 	isClient bool
@@ -22,14 +17,21 @@ type faketlsconn struct {
 // 本包会用到这个Conn，比如server和client的 Handshake，
 // 唯一特性就是它可以返回tls连接的底层tcp连接，见 GetRaw
 
-type Conn struct {
-	//*tls.Conn
+type Conn interface {
 	net.Conn
-	ptr            unsafe.Pointer
-	tlsPackageType byte // 0 means crypto/tls, 1 means utls
+	GetRaw(tls_lazy_encrypt bool) *net.TCPConn
+	GetTeeConn() *TeeConn
+	GetAlpn() string
+	GetSni() string
 }
 
-func (c *Conn) GetRaw(tls_lazy_encrypt bool) *net.TCPConn {
+type conn struct {
+	net.Conn
+	ptr     unsafe.Pointer
+	tlsType int
+}
+
+func (c *conn) GetRaw(tls_lazy_encrypt bool) *net.TCPConn {
 
 	rc := (*faketlsconn)(c.ptr)
 	if rc != nil {
@@ -50,47 +52,52 @@ func (c *Conn) GetRaw(tls_lazy_encrypt bool) *net.TCPConn {
 }
 
 // 直接获取TeeConn，仅用于已经确定肯定能获取到的情况
-func (c *Conn) GetTeeConn() *TeeConn {
+func (c *conn) GetTeeConn() *TeeConn {
 	rc := (*faketlsconn)(c.ptr)
 
 	return rc.conn.(*TeeConn)
 
 }
 
-//return c.Conn.ConnectionState().NegotiatedProtocol
-func (c *Conn) GetAlpn() string {
+// return c.Conn.ConnectionState().NegotiatedProtocol
+func (c *conn) GetAlpn() string {
 
-	if c.tlsPackageType == utlsPackage {
+	switch c.tlsType {
+	case UTls_t:
 		cc := (*utls.Conn)(c.ptr)
 		if cc == nil {
 			return ""
 		}
 		return cc.ConnectionState().NegotiatedProtocol
-
-	} else {
+	case Tls_t:
 		cc := (*tls.Conn)(c.ptr)
 		if cc == nil {
 			return ""
 		}
 		return cc.ConnectionState().NegotiatedProtocol
-	}
 
+	}
+	return ""
 }
 
-func (c *Conn) GetSni() string {
-	if c.tlsPackageType == utlsPackage {
+func (c *conn) GetSni() string {
+
+	switch c.tlsType {
+	case UTls_t:
 		cc := (*utls.Conn)(c.ptr)
 		if cc == nil {
 			return ""
 		}
 		return cc.ConnectionState().ServerName
 
-	} else {
+	case Tls_t:
 		cc := (*tls.Conn)(c.ptr)
 		if cc == nil {
 			return ""
 		}
 		return cc.ConnectionState().ServerName
+
 	}
+	return ""
 
 }

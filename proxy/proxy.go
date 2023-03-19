@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
@@ -11,26 +12,20 @@ import (
 	"github.com/xtaci/smux"
 )
 
-// default recommended handshake read timeout
-const CommonReadTimeout = time.Second * 4
-
-//set read timeout after CommonReadTimeout
-func SetCommonReadTimeout(c net.Conn) error {
-	return c.SetReadDeadline(time.Now().Add(CommonReadTimeout))
-}
-
-//规定，如果 proxy的server的handshake如果返回的是具有内层mux的连接，该连接要实现 MuxMarker 接口.
+// 规定，如果 proxy的server的handshake如果返回的是具有内层mux的连接，该连接要实现 MuxMarker 接口.
 type MuxMarker interface {
 	io.ReadWriteCloser
-	IsMux()
+	IsMux() bool
 }
 
-//实现 MuxMarker
-type MuxMarkerConn struct {
+// 实现 utils.MuxMarker, utils.User
+type UserReadWrapper struct {
+	utils.User
 	netLayer.ReadWrapper
+	Mux bool
 }
 
-func (mh *MuxMarkerConn) IsMux() {}
+func (w *UserReadWrapper) IsMux() bool { return w.Mux }
 
 // some client may 建立tcp连接后首先由客户端读服务端的数据？虽较少见但确实存在.
 // Anyway firstpayload might not be read, and we should try to reduce this delay.
@@ -58,6 +53,14 @@ type Client interface {
 	GetClientInnerMuxSession(wrc io.ReadWriteCloser) *smux.Session
 	InnerMuxEstablished() bool
 	CloseInnerMuxSession()
+
+	//用于在拨号时选用一个特定的ip拨号。
+	LocalTCPAddr() *net.TCPAddr
+	LocalUDPAddr() *net.UDPAddr
+
+	GetCreator() ClientCreator
+
+	sync.Locker //用于锁定 innerMux
 }
 
 type UserClient interface {
@@ -73,12 +76,24 @@ type UserClient interface {
 type Server interface {
 	BaseInterface
 
-	//ReadWriteCloser is for TCP request, net.PacketConn is for UDP request.
+	//net.Conn is for TCP request, netLayer.MsgConn is for UDP request.
 	// 约定，如果error返回的是 utils.ErrHandled， 则调用代码停止进一步处理。
 	Handshake(underlay net.Conn) (net.Conn, netLayer.MsgConn, netLayer.Addr, error)
 
 	//get/listen a useable inner mux
 	GetServerInnerMuxSession(wlc io.ReadWriteCloser) *smux.Session
+
+	//tproxy,tun 和 shadowsocks(udp) 都用到了 SelfListen
+	//
+	//is表示开启自监听; 此时若 tcp=1, 表示监听tcp, 若tcp=0, 表示自己不监听tcp, 但需要vs进行监听; 若tcp<0, 则表示自己不监听, 也不要vs监听; udp同理; 开启SelfListen同时表明 Server实现了 ListenerServer
+	SelfListen() (is bool, tcp, udp int)
+}
+
+type ListenerServer interface {
+	Server
+
+	//非阻塞
+	StartListen(func(netLayer.TCPRequestInfo), func(netLayer.UDPRequestInfo)) io.Closer
 }
 
 type UserServer interface {
@@ -90,25 +105,52 @@ type UserServer interface {
 // We think tcp/udp/kcp/raw_socket is FirstName，protocol of the proxy is LastName, and the rest is  MiddleName。
 //
 // An Example of a full name:  tcp+tls+ws+vless.
-// 总之，类似【域名】的规则，只不过分隔符从 点号 变成了加号, 且层级关系是从左到右。
 func GetFullName(pc BaseInterface) string {
-	if n := pc.Name(); n == DirectName {
-		return n
-	} else {
 
-		return getFullNameBuilder(pc, n).String()
-	}
+	return getFullNameBuilder(pc, pc.Name()).String()
 }
 
 // return GetFullName(pc) + "://" + pc.AddrStr() (+ #tag)
-func GetVSI_url(pc BaseInterface) string {
+func GetVSI_url(pc BaseInterface, targetNetwork string) string {
 	n := pc.Name()
-	if n == DirectName {
-		return DirectURL
-	}
+
 	sb := getFullNameBuilder(pc, n)
 	sb.WriteString("://")
-	sb.WriteString(pc.AddrStr())
+	if n == DirectName {
+		if targetNetwork == "tcp" {
+			if lta := pc.GetBase().LTA; lta != nil {
+				sb.WriteString(lta.String())
+			}
+		} else if targetNetwork == "udp" {
+			if lua := pc.GetBase().LUA; lua != nil {
+				sb.WriteString(lua.String())
+			}
+		}
+
+	} else {
+		sb.WriteString(pc.AddrStr())
+	}
+
+	path := ""
+
+	if lc := pc.GetBase().ListenConf; lc != nil {
+		if lc.Path != "" {
+			path = lc.Path
+		}
+	} else if dc := pc.GetBase().DialConf; dc != nil {
+		if dc.Path != "" {
+			path = dc.Path
+		}
+	}
+
+	if path != "" {
+		if !strings.HasPrefix(path, "/") {
+			sb.WriteString("/")
+
+		}
+		sb.WriteString(path)
+	}
+
 	if t := pc.GetTag(); t != "" {
 		sb.WriteByte('#')
 		sb.WriteString(t)
@@ -120,8 +162,14 @@ func GetVSI_url(pc BaseInterface) string {
 func getFullNameBuilder(pc BaseInterface, n string) *strings.Builder {
 
 	var sb strings.Builder
-	sb.WriteString(pc.Network())
-	sb.WriteString(pc.MiddleName())
+	ne := pc.Network()
+	sb.WriteString(ne)
+
+	mn := pc.MiddleName()
+	if ne == "" {
+		mn = strings.TrimLeft(mn, "+")
+	}
+	sb.WriteString(mn)
 	sb.WriteString(n)
 
 	if i, innerProxyName := pc.HasInnerMux(); i == 2 {

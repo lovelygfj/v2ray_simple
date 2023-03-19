@@ -13,11 +13,6 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-const (
-	toLower = 'a' - 'A'      // for use with OR.
-	toUpper = ^byte(toLower) // for use with AND.
-)
-
 //return a clone of m with headers trimmed to one value
 func TrimHeaders(m map[string][]string) (result map[string][]string) {
 
@@ -32,6 +27,12 @@ func TrimHeaders(m map[string][]string) (result map[string][]string) {
 // Algorithm below is like standard textproto/CanonicalMIMEHeaderKey, except
 // that it operates with slice of bytes and modifies it inplace without copying. copied from gobwas/ws
 func CanonicalizeHeaderKey(k []byte) {
+
+	const (
+		toLower = 'a' - 'A'      // for use with OR.
+		toUpper = ^byte(toLower) // for use with AND.
+	)
+
 	upper := true
 	for i, c := range k {
 		if upper && 'a' <= c && c <= 'z' {
@@ -89,7 +90,8 @@ type HeaderPreset struct {
 	Request  *RequestHeader  `toml:"request"`
 	Response *ResponseHeader `toml:"response"`
 
-	Strict bool `toml:"strict"`
+	Strict                              bool `toml:"strict"`
+	NoResponseHeaderWhenGotHttpResponse bool `toml:"no_resp_h_c"` //用于读取 回落到 真实http服务器的情况，此时我们就不用自定义的响应，而是用 真实服务器的响应。no_resp_h_c 意思是 no response header conditional
 }
 
 // 将Header改为首字母大写
@@ -172,9 +174,8 @@ func (h *HeaderPreset) AssignDefaultValue() {
 	h.Prepare()
 }
 
-func (h *HeaderPreset) ReadRequest(underlay net.Conn) (leftBuf *bytes.Buffer, err error) {
+func (h *HeaderPreset) ReadRequest(underlay io.Reader) (rp H1RequestParser, leftBuf *bytes.Buffer, err error) {
 
-	var rp H1RequestParser
 	err = rp.ReadAndParse(underlay)
 	if err != nil {
 		return
@@ -193,14 +194,18 @@ func (h *HeaderPreset) ReadRequest(underlay net.Conn) (leftBuf *bytes.Buffer, er
 		err = utils.ErrInErr{ErrDesc: "ReadRequest failed, wrong path", ErrDetail: utils.ErrInvalidData, Data: rp.Path}
 		return
 	}
+
 	allbytes := rp.WholeRequestBuf.Bytes()
+
+	leftBuf = bytes.NewBuffer(allbytes)
+
 	indexOfEnding := bytes.Index(allbytes, HeaderENDING_bytes)
 	if indexOfEnding < 0 {
 		err = utils.ErrInvalidData
 		return
 
 	}
-	headerBytes := rp.WholeRequestBuf.Next(indexOfEnding)
+	headerBytes := leftBuf.Next(indexOfEnding)
 
 	if h.Strict {
 		indexOfFirstCRLF := bytes.Index(allbytes, []byte(CRLF))
@@ -258,12 +263,12 @@ func (h *HeaderPreset) ReadRequest(underlay net.Conn) (leftBuf *bytes.Buffer, er
 
 	}
 
-	rp.WholeRequestBuf.Next(4)
+	leftBuf.Next(len(HeaderENDING))
 
-	return rp.WholeRequestBuf, nil
+	return
 }
 
-func (h *HeaderPreset) WriteRequest(underlay net.Conn, payload []byte) error {
+func (h *HeaderPreset) WriteRequest(underlay io.Writer, payload []byte) error {
 
 	buf := bytes.NewBuffer(payload)
 	r, err := http.NewRequest(h.Request.Method, h.Request.Path[0], buf)
@@ -281,7 +286,7 @@ func (h *HeaderPreset) WriteRequest(underlay net.Conn, payload []byte) error {
 	return r.Write(underlay)
 }
 
-func (h *HeaderPreset) ReadResponse(underlay net.Conn) (leftBuf *bytes.Buffer, err error) {
+func (h *HeaderPreset) ReadResponse(underlay io.Reader) (leftBuf *bytes.Buffer, err error) {
 
 	bs := utils.GetPacket()
 	var n int
@@ -307,7 +312,7 @@ func (h *HeaderPreset) ReadResponse(underlay net.Conn) (leftBuf *bytes.Buffer, e
 	return buf, nil
 }
 
-func (h *HeaderPreset) WriteResponse(underlay net.Conn, payload []byte) error {
+func (h *HeaderPreset) WriteResponse(underlay io.Writer, payload []byte) error {
 	buf := utils.GetBuf()
 
 	buf.WriteString("HTTP/")
@@ -347,6 +352,7 @@ type HeaderConn struct {
 	IsServerEnd bool
 
 	optionalReader io.Reader
+	ReadOkCallback func(*bytes.Buffer)
 
 	notFirstWrite bool
 }
@@ -356,10 +362,28 @@ func (c *HeaderConn) Read(p []byte) (n int, err error) {
 
 	if c.IsServerEnd {
 		if c.optionalReader == nil {
-			buf, err = c.H.ReadRequest(c.Conn)
+			var rp H1RequestParser
+
+			rp, buf, err = c.H.ReadRequest(c.Conn)
 			if err != nil {
-				err = utils.ErrInErr{ErrDesc: "http HeaderConn Read failed, at serverEnd", ErrDetail: err}
+
+				const errDesc = "http HeaderConn Read failed, at serverEnd"
+
+				if rp.WholeRequestBuf != nil {
+
+					err = &utils.ErrBuffer{
+						Err: utils.ErrInErr{ErrDesc: errDesc, ErrDetail: err},
+						Buf: rp.WholeRequestBuf,
+					}
+				} else {
+					err = &utils.ErrInErr{ErrDesc: errDesc, ErrDetail: err}
+				}
+
 				return
+			}
+			if c.ReadOkCallback != nil {
+				c.ReadOkCallback(rp.WholeRequestBuf)
+
 			}
 
 			c.optionalReader = io.MultiReader(buf, c.Conn)
@@ -385,9 +409,26 @@ func (c *HeaderConn) Write(p []byte) (n int, err error) {
 	if c.IsServerEnd {
 		if c.notFirstWrite {
 			return c.Conn.Write(p)
+		} else {
+			c.notFirstWrite = true
+
+			var shouldWriteDirectly bool
+
+			if c.H.NoResponseHeaderWhenGotHttpResponse {
+				if len(p) > 5 && string(p[:4]) == "HTTP" {
+					shouldWriteDirectly = true
+				}
+			}
+
+			if shouldWriteDirectly {
+				return c.Conn.Write(p)
+
+			} else {
+				err = c.H.WriteResponse(c.Conn, p)
+
+			}
+
 		}
-		c.notFirstWrite = true
-		err = c.H.WriteResponse(c.Conn, p)
 
 	} else {
 

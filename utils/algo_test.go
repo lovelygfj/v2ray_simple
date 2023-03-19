@@ -4,14 +4,112 @@ import (
 	"testing"
 
 	"github.com/e1732a364fed/v2ray_simple/utils"
+	"golang.org/x/exp/slices"
 
 	"gonum.org/v1/gonum/stat/combin"
 )
 
+func TestSortByOrder(t *testing.T) {
+	checkResult := func(good, suspect []int) bool {
+		if len(suspect) != len(good) {
+			return false
+		}
+		m := make(map[int]bool)
+		for _, v := range suspect {
+			if m[v] {
+				return false
+			}
+			if !slices.Contains(good, v) {
+				return false
+			}
+			m[v] = true
+		}
+		return true
+	}
+	x1 := []int{1, 2, 3, 4, 5}
+	order := []int{5, 4, 1, 2, 3}
+	result, newo, ei := utils.SortByOrder(x1, order)
+	t.Log(result, newo, ei)
+	if !checkResult(x1, result) {
+		t.Fail()
+	}
+
+	order = []int{4, 1, 2, 3, 0}
+	result, newo, ei = utils.SortByOrder(x1, order)
+	t.Log(result, newo, ei)
+	if !checkResult(x1, result) {
+		t.Fail()
+	}
+
+	order = []int{4, 1, 2, 2, 0}
+	result, newo, ei = utils.SortByOrder(x1, order)
+	t.Log(result, newo, ei)
+	if !checkResult(x1, result) {
+		t.Fail()
+	}
+
+	order = []int{4, 1, 2, 0}
+	result, newo, ei = utils.SortByOrder(x1, order)
+	t.Log(result, newo, ei)
+	if !checkResult(x1, result) {
+		t.Fail()
+	}
+
+	order = []int{0, 4, 1, 2, 3, 3}
+	result, newo, ei = utils.SortByOrder(x1, order)
+	t.Log(result, newo, ei)
+	if !checkResult(x1, result) {
+		t.Fail()
+	}
+
+	order = []int{0, 0, 1, 2, 3, 3}
+	result, newo, ei = utils.SortByOrder(x1, order)
+	t.Log(result, newo, ei)
+	if !checkResult(x1, result) {
+		t.Fail()
+	}
+
+}
+
+const realv1 = "v1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+const realv2 = "v2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+const e1 = "eeeeeeeeeeeeeeeeeeeee1"
+const e2 = "eeeeeeeeeeeeeeeeeeeeeee2"
+
+const testSplitStr = e1 + ":" + realv1 + "\n" + e2 + ":" + realv2
+
+func TestCommonSpit(t *testing.T) {
+
+	ok, v1, v2 := utils.CommonSplit(testSplitStr, e1, e2)
+
+	if !ok || realv1 != v1 || realv2 != v2 {
+		t.FailNow()
+	}
+
+	ok, v1, v2 = utils.CommonSplit_regex(testSplitStr, e1, e2)
+
+	if !ok || realv1 != v1 || realv2 != v2 {
+		t.FailNow()
+	}
+
+}
+
+func BenchmarkCommonSplit_strings(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		utils.CommonSplit_strings(testSplitStr, "e1", "e2")
+	}
+}
+
+func BenchmarkCommonSplit_regex(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		utils.CommonSplit_regex(testSplitStr, "e1", "e2")
+	}
+}
+
 var x = []string{"AA", "BB", "CC", "DD"}
 var y = []int{1, 2, 3, 4}
 
-func TestSplice(t *testing.T) {
+func TestTrimSlice(t *testing.T) {
 	t.Log(utils.TrimSlice(utils.CloneSlice(x), 0))
 	t.Log(utils.TrimSlice(utils.CloneSlice(x), 1))
 	t.Log(utils.TrimSlice(utils.CloneSlice(x), 2))
@@ -23,6 +121,7 @@ func TestSplice(t *testing.T) {
 }
 
 /*
+
 BenchmarkAllSubSets_4-8                       	  969097	      1198 ns/op
 BenchmarkAllSubSets_3-8                       	 2340783	       514.6 ns/op
 BenchmarkAllSubSets_2-8                       	 5716852	       210.4 ns/op

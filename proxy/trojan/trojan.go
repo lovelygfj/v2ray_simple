@@ -1,6 +1,6 @@
-//package trojan implements trojan protocol for proxy.Client and proxy.Server.
+// Package trojan implements trojan protocol for proxy.Client and proxy.Server.
 //
-//See https://trojan-gfw.github.io/trojan/protocol .
+// See https://trojan-gfw.github.io/trojan/protocol .
 package trojan
 
 import (
@@ -38,7 +38,7 @@ var (
 	crlf = []byte{0x0d, 0x0a}
 )
 
-//即trojan 的 任意长度密码 的 定长二进制表示。
+// 即trojan 的 任意长度密码 的 定长二进制表示。
 func SHA224(password string) (r [passBytesLen]byte) {
 	hash := sha256.New224()
 	hash.Write([]byte(password))
@@ -46,7 +46,7 @@ func SHA224(password string) (r [passBytesLen]byte) {
 	return
 }
 
-//56字节数据转28字节字符串
+// 56字节数据转28字节字符串
 func PassStrToBytes(str string) []byte {
 	bs, err := hex.DecodeString(str)
 	if err != nil {
@@ -56,7 +56,7 @@ func PassStrToBytes(str string) []byte {
 	return bs
 }
 
-//28字节数据转56字节字符串
+// 28字节数据转56字节字符串
 func PassBytesToStr(bs []byte) string {
 	return hex.EncodeToString(bs)
 }
@@ -76,22 +76,22 @@ func NewUserByPlainTextPassword(plainPass string) User {
 	}
 }
 
-//明文密码
+// 明文密码
 func (u User) IdentityStr() string {
 	return u.plainStr
 }
 
-//明文密码
+// 明文密码
 func (u User) IdentityBytes() []byte {
 	return []byte(u.plainStr)
 }
 
-//56字节hex
+// 56字节hex
 func (u User) AuthStr() string {
 	return u.hexStr
 }
 
-//28字节纯二进制
+// 28字节纯二进制
 func (u User) AuthBytes() []byte {
 	return u.hexBs
 }
@@ -105,14 +105,14 @@ func InitUsers(uc []utils.UserConf) (us []utils.User) {
 	return
 }
 
-//trojan协议 的前56字节 是 sha224的28字节 每字节 转义成 base 16, with lower-case letters for a-f 的 两个字符。
+// trojan协议 的前56字节 是 sha224的28字节 每字节 转义成 base 16, with lower-case letters for a-f 的 两个字符。
 // 实际上trojan协议文档写的不严谨，它只说了用hex，没说用大写还是小写。我看它代码实现用的是小写。
 func SHA224_hexStringBytes(password string) []byte {
 	hash := sha256.New224()
 	hash.Write([]byte(password))
 	bs := hash.Sum(nil)
 	r := make([]byte, passStrLen)
-	hex.Encode(r, bs) //hex包Encode 使用小写字符，（但是decode确实同时支持大写和小写的，怪）
+	hex.Encode(r, bs) //hex包Encode 使用小写字符，（但decode却是同时支持大写和小写的，怪）
 	return r
 }
 
@@ -123,7 +123,7 @@ func SHA224_hexString(password string) string {
 	return PassBytesToStr(bs)
 }
 
-//依照trojan协议的格式读取 地址的域名、ip、port信息
+// 依照trojan协议的格式读取 地址的域名、ip、port信息
 func GetAddrFrom(buf utils.ByteReader, ismux bool) (addr netLayer.Addr, err error) {
 	var b1 byte
 
@@ -178,7 +178,7 @@ func GetAddrFrom(buf utils.ByteReader, ismux bool) (addr netLayer.Addr, err erro
 		if err != nil {
 			return
 		}
-		if n != 4 {
+		if n != net.IPv6len {
 			err = utils.ErrShortRead
 			return
 		}
@@ -187,8 +187,6 @@ func GetAddrFrom(buf utils.ByteReader, ismux bool) (addr netLayer.Addr, err erro
 		err = utils.ErrInErr{ErrDesc: "trojan GetAddrFrom err", ErrDetail: utils.ErrInvalidData, Data: b1}
 		return
 	}
-
-	//log.Println("trojan got addr", addr)
 
 	pb1, err := buf.ReadByte()
 	if err != nil {
@@ -214,13 +212,13 @@ func GetAddrFrom(buf utils.ByteReader, ismux bool) (addr netLayer.Addr, err erro
 	return
 }
 
-//https://p4gefau1t.github.io/trojan-go/developer/url/
+// https://p4gefau1t.github.io/trojan-go/developer/url/
 func GenerateOfficialDraftShareURL(dialconf *proxy.DialConf) string {
 
 	var u url.URL
 
 	u.Scheme = Name
-	u.User = url.User(dialconf.Uuid)
+	u.User = url.User(dialconf.UUID)
 	if dialconf.IP != "" {
 		u.Host = dialconf.IP + ":" + strconv.Itoa(dialconf.Port)
 	} else {

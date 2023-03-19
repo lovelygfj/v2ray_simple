@@ -8,8 +8,8 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-//trojan比较简洁，这个 UserTCPConn 只是用于读取握手读取时读到的剩余的缓存。
-//实现 net.Conn, io.ReaderFrom, utils.User, utils.MultiWriter, netLayer.Splicer, netLayer.ConnWrapper
+// trojan比较简洁，这个 UserTCPConn 只是用于读取握手读取时读到的剩余的缓存。
+// 实现 net.Conn, io.ReaderFrom, utils.User, utils.MultiWriter, netLayer.Splicer, netLayer.ConnWrapper
 type UserTCPConn struct {
 	net.Conn
 	User
@@ -20,9 +20,11 @@ type UserTCPConn struct {
 	underlayIsBasic bool
 
 	isServerEnd bool
+
+	mw utils.MultiWriter
 }
 
-func (c *UserTCPConn) GetRawConn() net.Conn {
+func (c *UserTCPConn) Upstream() net.Conn {
 	return c.Conn
 }
 
@@ -41,28 +43,54 @@ func (c *UserTCPConn) Write(p []byte) (int, error) {
 	return c.Conn.Write(p)
 }
 
-func (c *UserTCPConn) EverPossibleToSplice() bool {
+// 当底层链接可以暴露为 tcp或 unix链接时，返回true
+func (c *UserTCPConn) EverPossibleToSpliceRead() bool {
+	if netLayer.IsTCP(c.Conn) != nil {
+		return true
+	}
+	if netLayer.IsUnix(c.Conn) != nil {
+		return true
+	}
 
-	if netLayer.IsBasicConn(c.Conn) {
+	if s, ok := c.Conn.(netLayer.SpliceReader); ok {
+		return s.EverPossibleToSpliceRead()
+	}
+
+	return false
+}
+
+func (c *UserTCPConn) CanSpliceRead() (bool, *net.TCPConn, *net.UnixConn) {
+	if c.isServerEnd {
+		if c.remainFirstBufLen > 0 {
+			return false, nil, nil
+		}
+	}
+
+	return netLayer.ReturnSpliceRead(c.Conn)
+}
+
+func (c *UserTCPConn) EverPossibleToSpliceWrite() bool {
+
+	if netLayer.IsTCP(c.Conn) != nil {
 		return true
 	}
 	if s, ok := c.Conn.(netLayer.Splicer); ok {
-		return s.EverPossibleToSplice()
+		return s.EverPossibleToSpliceWrite()
 	}
 	return false
 }
 
-func (c *UserTCPConn) CanSplice() (r bool, conn net.Conn) {
+func (c *UserTCPConn) CanSpliceWrite() (r bool, conn *net.TCPConn) {
 	if !c.isServerEnd && c.remainFirstBufLen > 0 {
 		return false, nil
 	}
 
-	if netLayer.IsBasicConn(c.Conn) {
+	if tc := netLayer.IsTCP(c.Conn); tc != nil {
 		r = true
-		conn = c.Conn
+		conn = tc
 
 	} else if s, ok := c.Conn.(netLayer.Splicer); ok {
-		r, conn = s.CanSplice()
+		r, conn = s.CanSpliceWrite()
 	}
 
 	return
@@ -84,8 +112,8 @@ func (c *UserTCPConn) WriteBuffers(buffers [][]byte) (int64, error) {
 		if c.underlayIsBasic {
 			return utils.BuffersWriteTo(buffers, c.Conn)
 
-		} else if mr, ok := c.Conn.(utils.MultiWriter); ok {
-			return mr.WriteBuffers(buffers)
+		} else if c.mw != nil {
+			return c.mw.WriteBuffers(buffers)
 		}
 	}
 

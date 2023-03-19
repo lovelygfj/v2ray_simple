@@ -5,9 +5,25 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+// generics ////////////////////////////////////////////////////////////////
+
+func GetOneFromMap[T comparable](m map[T]bool, defaultV T) T {
+	for k := range m {
+		return k
+	}
+	return defaultV
+}
+
+func ArrayToPtrArray[T any](a []T) (r []*T) {
+	for _, v := range a {
+		r = append(r, &v)
+	}
+	return
+}
+
 //Combinatorics ////////////////////////////////////////////////////////////////
 
-//func AllSubSets edited from https://github.com/mxschmitt/golang-combinations with MIT License
+// func AllSubSets edited from https://github.com/mxschmitt/golang-combinations with MIT License
 // All returns all combinations for a given T array.
 // This is essentially a powerset of the given set except that the empty set is disregarded.
 func AllSubSets[T comparable](set []T) (subsets [][]T) {
@@ -32,7 +48,7 @@ func AllSubSets[T comparable](set []T) (subsets [][]T) {
 	return subsets
 }
 
-//AllSubSets 测速有点慢, 我改进一下内存分配,可加速一倍多
+// AllSubSets 测速有点慢, 我改进一下内存分配,可加速一倍多
 func AllSubSets_improve1[T comparable](set []T) (subsets [][]T) {
 	length := uint(len(set))
 	subsets = make([][]T, 0, length*length)
@@ -50,14 +66,12 @@ func AllSubSets_improve1[T comparable](set []T) (subsets [][]T) {
 	return subsets
 }
 
-// generics ////////////////////////////////////////////////////////////////
-
 func CloneSlice[T any](a []T) (r []T) {
 	r = make([]T, len(a))
 	copy(r, a)
 	return
 
-	//实际上 golang.org/x/exp/slices 的 Clone 函数也可以, 不过我还是觉得我自己的好理解一些
+	//实际上 golang.org/x/exp/slices 的 Clone 函数也可以
 }
 
 // TrimSlice 从一个slice中移除一个元素, 会直接改动原slice数据
@@ -71,7 +85,120 @@ func TrimSlice[T any](a []T, deleteIndex int) []T {
 	}
 	return a[:j]
 
-	//实际上 golang.org/x/exp/slices 的 Delete 函数也可以, 不过我还是觉得我自己的好理解一些
+	//实际上 golang.org/x/exp/slices 的 Delete 函数也可以, 但是它是范围删除, 多了一个参数
+}
+
+// 根据传入的order来对arr重新排序；order必须长度与arr一致，而且包含所有索引
+// 若erri>0 则证明传入的order内容有误。1表示过长，2表示过短，3表示内容出错.
+// 在 erri>0 时，本函数会试图修复order，生成一个neworder并用该 neworder 对arr排序。
+func SortByOrder[T any](arr []T, order []int) (result []T, neworder []int, erri int) {
+	//检查长度
+	if len(order) != len(arr) {
+		if len(order) > len(arr) { //这种是有问题的，不应传入;不过，我们整理出一个新的order列表
+
+			erri = 1
+			neworder = make([]int, 0, len(arr))
+
+			//填上已有的
+			for _, v := range order {
+				if v >= 0 && v < len(arr) && !slices.Contains(neworder, v) {
+					neworder = append(neworder, v)
+				}
+			}
+
+			//补全没有的
+			for i := 0; i < len(arr); i++ {
+				if !slices.Contains(neworder, i) {
+					neworder = append(neworder, i)
+				}
+			}
+
+			order = neworder
+		} else {
+			erri = 2
+
+			//补全没有的
+
+			for i := 0; i < len(arr); i++ {
+				if !slices.Contains(order, i) {
+					order = append(order, i)
+				}
+			}
+			neworder = order
+		}
+	}
+	//检查重复或索引不正确
+	for i, v := range order {
+		order[i] = -1
+		if slices.Contains(order, v) || v >= len(arr) || v < 0 {
+			//有重复，证明该序列无效，重建顺序序列
+			erri = 3
+
+			neworder = make([]int, 0, len(arr))
+
+			for i := 0; i < len(arr); i++ {
+				neworder = append(neworder, i)
+			}
+			order = neworder
+			break
+		}
+		order[i] = v
+	}
+
+	result = make([]T, len(arr))
+	for i, v := range order {
+		result[i] = arr[v]
+	}
+
+	return
+}
+
+func MoveItem[T any](arr *[]T, fromIndex, toIndex int) {
+	var item = (*arr)[fromIndex]
+	Splice(arr, fromIndex, 1)
+	Splice(arr, toIndex, 0, item)
+}
+
+// splices 包在  Nov 10, 2022 添加了Replace函数, 就不用我们自己的实现了
+// v0.0.0-20221110155412-d0897a79cd37, 不过我们为了代码兼容依然保存该代码,直到2.x.x版本.
+//
+// items to insert at start, delete deleteCount items at start.
+//
+// See https://github.com/zzwx/splice/blob/main/splice.go
+func Splice[T any](source *[]T, start int, deleteCount int, items ...T) (removed []T) {
+	if start > len(*source) {
+		start = len(*source)
+	}
+	if start < 0 {
+		start = len(*source) + start
+	}
+	if start < 0 {
+		start = 0
+	}
+	if deleteCount < 0 {
+		deleteCount = 0
+	}
+	if deleteCount > 0 {
+		for i := 0; i < deleteCount; i++ {
+			if i+start < len(*source) {
+				removed = append(removed, (*source)[i+start])
+			}
+		}
+	}
+	deleteCount = len(removed) // Adjust to actual delete count
+	grow := len(items) - deleteCount
+	switch {
+	case grow > 0: // So we grow
+		*source = append(*source, make([]T, grow)...)
+		copy((*source)[start+deleteCount+grow:], (*source)[start+deleteCount:])
+	case grow < 0: // So we shrink
+		from := start + len(items)
+		to := start + deleteCount
+		copy((*source)[from:], (*source)[to:])
+		*source = (*source)[:len(*source)+grow]
+	}
+	copy((*source)[start:], items)
+	return
 }
 
 func GetMapSortedKeySlice[K constraints.Ordered, V any](theMap map[K]V) []K {

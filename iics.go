@@ -24,7 +24,7 @@ var iicsZapWriterPool = sync.Pool{
 	},
 }
 
-//专用于 iics的结构
+// 专用于 iics的结构
 type iicsZapWriter struct {
 	ce             *zapcore.CheckedEntry
 	assignedFields []zapcore.Field //始终保持 有且只有 一项
@@ -36,7 +36,7 @@ func (zw *iicsZapWriter) setid(id uint32) {
 	zw.id = id
 }
 
-//只能调用Write一次，调用之后，zw 便不再可用。
+// 只能调用Write一次，调用之后，zw 便不再可用。
 func (zw *iicsZapWriter) Write(fields ...zapcore.Field) {
 	if len(fields) > 0 {
 		realFields := append(zw.assignedFields, fields...)
@@ -51,9 +51,11 @@ func (zw *iicsZapWriter) Write(fields ...zapcore.Field) {
 	iicsZapWriterPool.Put(zw)
 }
 
-//一个贯穿转发流程的关键结构,简称iics
+// 一个贯穿转发流程的关键结构,简称iics
 type incomingInserverConnState struct {
-	id uint32 //6位数字(十进制), 用于标识每一个连接.
+	id uint32 //十进制固定6位随机数, 用于标识每一个连接.
+
+	GlobalInfo *GlobalInfo
 
 	// 在多路复用的情况下, 可能产生多个 IncomingInserverConnState，
 	// 共用一个 baseLocalConn, 但是 wrappedConn 各不相同。
@@ -64,20 +66,23 @@ type incomingInserverConnState struct {
 	inServer      proxy.Server //可为 nil
 	defaultClient proxy.Client
 
-	inTag       string //在inServer为nil时，可用此项确定 inTag
+	isInner bool
+
+	inTag       string //在inServer为nil时，可用此项确定 inTag。比如tproxy就属于这种情况
 	useSniffing bool   //在inServer为nil时，可用此项确定 是否使用sniffing
 
 	cachedRemoteAddr string
 
-	inServerTlsConn            *tlsLayer.Conn
+	inServerTlsConn            tlsLayer.Conn
 	inServerTlsRawReadRecorder *tlsLayer.Recorder
 
 	isFallbackH2        bool
 	fallbackRequestPath string
 	fallbackH2Request   *http.Request
+	fallbackRW          http.ResponseWriter
 	fallbackFirstBuffer *bytes.Buffer
 
-	fallbackXver int
+	fallbackXver int //若大于等于0，则证明该进项已经被确定需要进行fallback。
 
 	firstPayload   []byte
 	udpFirstTarget netLayer.Addr
@@ -89,9 +94,16 @@ type incomingInserverConnState struct {
 	routedToDirect bool
 
 	routingEnv *proxy.RoutingEnv //used in passToOutClient
+
+	heapObj *heapObj
 }
 
-//每个iics使用之前，必须调用 genID
+type heapObj struct {
+	headerPass  bool
+	wholeBuffer *bytes.Buffer
+}
+
+// 每个iics使用之前，必须调用 genID
 func (iics *incomingInserverConnState) genID() {
 	const low = 100000
 	const hi = low*10 - 1
@@ -100,14 +112,11 @@ func (iics *incomingInserverConnState) genID() {
 
 // 在调用 passToOutClient前遇到err时调用, 若找出了buf，设置iics，并返回true
 func (iics *incomingInserverConnState) extractFirstBufFromErr(err error) bool {
-	if ce := iics.CanLogWarn("failed in inServer proxy handshake"); ce != nil {
-		ce.Write(
-			zap.String("handler", iics.inServer.AddrStr()),
-			zap.Error(err),
-		)
-	}
 
-	if !iics.inServer.CanFallback() {
+	var hasHeader = iics.inServer.HasHeader() != nil
+	var canFallback = iics.inServer.CanFallback() || hasHeader
+
+	if !canFallback {
 		if iics.wrappedConn != nil {
 			iics.wrappedConn.Close()
 
@@ -118,8 +127,17 @@ func (iics *incomingInserverConnState) extractFirstBufFromErr(err error) bool {
 	//通过err找出 并赋值给 iics.theFallbackFirstBuffer
 	{
 
-		fe, ok := err.(*utils.ErrBuffer)
+		be, ok := err.(*utils.ErrBuffer)
 		if !ok {
+			if iics.heapObj != nil {
+				if iics.heapObj.headerPass && iics.heapObj.wholeBuffer != nil {
+					//http header通过了但是后面出错，有可能是类似 vmess+http 的情况，收到了一个正常的Get请求，后面的vmess读取不到数据导致了 read timeout，此时依然可以回落.
+					iics.fallbackFirstBuffer = iics.heapObj.wholeBuffer
+					iics.heapObj = nil
+					return true
+
+				}
+			}
 			// 能fallback 但是返回的 err却不是fallback err，证明遇到了更大问题，可能是底层read问题，所以也不用继续fallback了
 			if iics.wrappedConn != nil {
 				iics.wrappedConn.Close()
@@ -127,9 +145,15 @@ func (iics *incomingInserverConnState) extractFirstBufFromErr(err error) bool {
 			return false
 		}
 
-		if firstbuffer := fe.Buf; firstbuffer == nil {
+		if firstbuffer := be.Buf; firstbuffer == nil {
 			//不应该，至少能读到1字节的。
+			if ce := utils.CanLogErr("No FirstBuffer"); ce != nil {
 
+				ce.Write(
+					zap.Any("params", be.Buf),
+				)
+
+			}
 			panic("No FirstBuffer")
 
 		} else {
@@ -140,7 +164,7 @@ func (iics *incomingInserverConnState) extractFirstBufFromErr(err error) bool {
 	return true
 }
 
-//查看当前配置 是否支持fallback, 并获得回落地址。
+// 查看当前配置 是否支持fallback, 并获得回落地址。
 // 被 passToOutClient 调用. 若 无fallback则 result < 0, 否则返回所使用的 PROXY protocol 版本, 0 表示 回落但是不用 PROXY protocol.
 //
 // 本方法不会修改 iics的任何内容.
@@ -150,7 +174,7 @@ func (iics *incomingInserverConnState) checkfallback() (targetAddr netLayer.Addr
 	//一般情况下 iics.RoutingEnv 都会给出，但是 如果是 热加载、tproxy、go test、单独自定义 调用 ListenSer 不给出env 等情况的话， iics.RoutingEnv 都是空值
 	if iics.routingEnv != nil {
 
-		if mf := iics.routingEnv.MainFallback; mf != nil {
+		if mf := iics.routingEnv.Fallback; mf != nil {
 
 			var thisFallbackType byte
 
@@ -216,7 +240,7 @@ func (iics *incomingInserverConnState) checkfallback() (targetAddr netLayer.Addr
 
 		}
 
-	}
+	} //if iics.routingEnv != nil {
 
 	//默认回落, 每个listen配置 都 有一个自己独享的默认回落配置 (fallback = 80 这种)
 
@@ -269,4 +293,16 @@ func (iics *incomingInserverConnState) CanLogLevel(level int, msg string) *iicsZ
 	} else {
 		return nil
 	}
+}
+func (iics *incomingInserverConnState) getRealRAddr() (raddr string) {
+	raddr = iics.cachedRemoteAddr
+	if iics.wrappedConn != nil {
+		if realRA := iics.wrappedConn.RemoteAddr(); realRA != nil {
+			//大部分情况下，realRA.String() == iics.cachedRemoteAddr
+			// 但是在 ws/grpc 下，我们的代码 会读取 X-Forwarded-For, 来试图找出反代之前的客户端真实ip
+			//此时 RemoteAddr就 不相等了
+			raddr = realRA.String()
+		}
+	}
+	return
 }

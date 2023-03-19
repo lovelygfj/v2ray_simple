@@ -55,16 +55,33 @@ sudo cp examples/vlesss.server.toml server.toml
 
 如果你没有证书，想要先用自签名证书试试，可以运行 `verysimple -i` 进入交互模式，然后根据提示自行生成自签名ssl证书
 
-生成的证书会为 yourcert.pem 和 yourcert.key
-
-你可以重命名为 cert.pem 和 cert.key 来匹配示例文件，或反过来，修改示例文件里的证书名称以匹配 yourcert这个名称.
+生成的证书会为 cert.pem 和 cert.key
 
 当然，你也可以通过README.md 里的指导自行使用openssl生成证书。
 
 当然，最好还是用自己的域名+acme等形式 申请真证书。
 
 ## 第三步，服务部分
-然后编辑服务文件
+
+### 简单方式
+
+如果你不愿意使用linux的“后台服务”，只是想手动去令它在后台运行，那么实际上，在verysimple所在位置运行如下一段命令即可。
+
+
+    nohup ./verysimple -c server.toml >/dev/null &
+
+
+这里将它的标准输出舍弃了，因为一般来说我们会在toml配置文件中 配置好日志文件名称；如果不舍弃输出的话，就会多一个输出（到控制台），增加系统负担。
+
+同样，视你的权限来酌情在命令前面添加 `sudo`
+
+上面这个nohup这行命令，可以写到一个文件里，比如 run.sh, 然后用 `chmod +x run.sh` 将其变为可执行文件, 之后你只要运行 run.sh 就可以后台运行了。
+
+如果你会crontab，还可以在里面设置开机运行该脚本。这种方式就比 systemctl轻量多了，而且还适用于openwrt。
+
+### 标准方式
+
+编辑服务文件
 `sudo vi /etc/systemd/system/verysimple.service`
 
 ```sh
@@ -123,10 +140,8 @@ https://github.com/e1732a364fed/v2ray_simple/pkgs/container/v2ray_simple
 
 在含有 docker-compose.yaml 的目录下，运行 `docker-compose up -d` 来启动；运行 `docker-compose down` 来关闭。
 
-这个docker-compose 设计时，要求你 宿主机有一个 `/etc/verysimple` 文件夹，里面放 一个 `server.toml` 配置文件。 
+这个docker-compose 设计时，要求你 宿主机有一个 `/etc/verysimple` 文件夹，里面放 一个 `server.toml` 配置文件。 其他mmdb或者 geosite文件夹 如果有需要，也可以放入 /etc/verysimple 中
 
-还要求你宿主机的 `/etc/domain-list-community` 文件夹 为 geosite 文件夹 （内有data文件夹，data文件夹内部有很多文件，文件格式等同于 v2fly/domain-list-community 项目中的 data文件夹 中的 文件 的格式）。
-
-如果你没有这个文件夹或者没有这个文件，则该 docker-compose 肯定运行不了。当然，你可以自行修改 该 `docker-compose.yaml` 文件
+你可以自行修改 该 `docker-compose.yaml` 文件
 
 （我没试过，如果有错误请指正）

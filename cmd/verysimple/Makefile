@@ -6,13 +6,13 @@
 # 简单起见，该makefile只负责编译64位的。
 #
 # for embedding geoip file:
-#	make tags="embed_geoip" macm1
+#	make tags="embed_geoip" macm
 #
-# also has grpc_full and noquic tags. See godoc for details.
+# other tags: noquic nocli
 #
 # 编译后，还会生成一个 "tags" 和 "BUILD_VERSION" 文件，记录此次编译所使用的 tag 和生成的版本号
 #
-# 目前发布版直接使用go1.18编译，你如果想编译出相同文件，也要使用go1.18才行
+# 目前发布版直接使用go1.19编译，你如果想编译出相同文件，也要使用go1.19才行
 
 prefix          :=verysimple
 winsuffix       :=.exe
@@ -49,7 +49,7 @@ defaultOutFn    :=${prefix}${defaultSuffix}
 # 注意，因为 macos, linux 和 windows 上 所执行的 md5命令的输出略有不同, 所以完全相同的文件在不同系统上实际得到的 总和md5 值是不同的。所以 md5值 要和 build_on 信息 结合 进行判断。
 
 # BUILD_VERSION   :=myversion
-BUILD_VERSION   :=[ build_on: $(detected_OS), commit: $(shell git rev-parse --short HEAD), all_go_files_md5: $(shell $(md5cmdline)), tags:$(tags) ]
+BUILD_VERSION   :=[ commit: $(shell git rev-parse --short HEAD), all_go_files_md5: $(shell $(md5cmdline)), tags:$(tags) ]
 
 
 cmd:=go build -tags "$(tags)"  -trimpath -ldflags "-X 'main.Version=${BUILD_VERSION}' -s -w -buildid=" -o
@@ -113,7 +113,7 @@ endif
 
 $(eval $(call DEPENDABLE_VAR,BUILD_VERSION))
 
-all: linux_amd64 linux_arm64 android_arm64 macos macm1 win10 
+all: linux_amd64 linux_arm64 android_arm64 macos macm win10 
 	@echo "compiling for common platforms"
 
 getver:
@@ -129,7 +129,7 @@ linuxAmdFn     :=${prefix}_linux_amd64
 linuxArmFn     :=${prefix}_linux_arm64
 androidArm64Fn :=${prefix}_android_arm64
 macFn          :=${prefix}_macos
-macM1Fn        :=${prefix}_macm1
+macMFn        :=${prefix}_macm
 winFn          :=${prefix}_win10
 
 
@@ -148,11 +148,14 @@ macos:
 	$(call compile,$(macFn),darwin,amd64)
 
 #macos apple silicon
-macm1:
-	$(call compile,$(macM1Fn),darwin,arm64)
+macm:
+	$(call compile,$(macMFn),darwin,arm64)
 
 win10:
 	$(call compile,$(winFn),windows,amd64,$(winsuffix))
+winarm:
+	$(call compile,$(winFn),windows,arm64,$(winsuffix))
+
 
 
 clean:
@@ -164,14 +167,14 @@ clean:
 	rm -f $(linuxArmFn)
 	rm -f ${winFn}.exe
 	rm -f $(macFn)
-	rm -f $(macM1Fn)
+	rm -f $(macMFn)
 	rm -f $(androidArm64Fn)
 
 	rm -f $(linuxAmdFn).tar.xz
 	rm -f $(linuxArmFn).tar.xz
 	rm -f ${winFn}.tar.xz
 	rm -f $(macFn).tar.xz
-	rm -f $(macM1Fn).tar.xz
+	rm -f $(macMFn).tar.xz
 	rm -f $(androidArm64Fn).tar.xz
 
 rmlog:

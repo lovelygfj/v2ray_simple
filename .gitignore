@@ -4,7 +4,10 @@ client.toml
 server.toml
 v2ray_simple
 v2ray_simple_*
+vsc_*
+vs_gui*
 cmd/verysimple/verysimple
+cmd/verysimple/*.toml
 verysimple_*
 *.exe
 *.DS_Store
@@ -26,3 +29,10 @@ fakeclient.key
 fakeca.key
 fakeca.crt
 .vscode
+.verysimple_preferences
+vs_qrcode.png
+wintun/
+wintun.dll
+*.aar
+*.jar
+*.pprof

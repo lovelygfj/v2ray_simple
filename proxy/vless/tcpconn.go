@@ -11,7 +11,7 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-//实现 net.Conn, io.ReaderFrom, utils.User, utils.MultiWriter, utils.MultiReader, netLayer.Splicer, netLayer.ConnWrapper
+// 实现 net.Conn, io.ReaderFrom, utils.User, utils.MultiWriter, utils.MultiReader, netLayer.Splicer, netLayer.ConnWrapper, netLayer.SpliceReader
 type UserTCPConn struct {
 	net.Conn
 
@@ -23,58 +23,96 @@ type UserTCPConn struct {
 
 	underlayIsBasic bool
 
-	version     int
+	version     byte
 	isServerEnd bool //for v0
 
 	isntFirstPacket bool //for v0
 
-	rr syscall.RawConn   //用于 Readbuffers
-	mr utils.MultiReader //用于 Readbuffers
+	rr syscall.RawConn //用于 Readbuffers
+
+	readvType int
+	br        utils.BuffersReader
+	mw        utils.MultiWriter
 }
 
 func (u *UserTCPConn) GetProtocolVersion() int {
-	return u.version
+	return int(u.version)
 }
 
-func (c *UserTCPConn) GetRawConn() net.Conn {
+func (c *UserTCPConn) Upstream() net.Conn {
 	return c.Conn
 }
 
-//当前连接状态是否可以直接写入底层Conn而不经任何改动/包装
+// 当前连接状态是否可以直接写入底层Conn而不经任何改动/包装
 func (c *UserTCPConn) canDirectWrite() bool {
 	return c.version == 1 || (c.version == 0 && !(c.isServerEnd && !c.isntFirstPacket))
 }
 
-func (c *UserTCPConn) EverPossibleToSplice() bool {
+// 当底层链接可以暴露为 tcp或 unix链接时，返回true
+func (c *UserTCPConn) EverPossibleToSpliceRead() bool {
+	if netLayer.IsTCP(c.Conn) != nil {
+		return true
+	}
+	if netLayer.IsUnix(c.Conn) != nil {
+		return true
+	}
 
-	if netLayer.IsBasicConn(c.Conn) {
+	if s, ok := c.Conn.(netLayer.SpliceReader); ok {
+		return s.EverPossibleToSpliceRead()
+	}
+
+	return false
+}
+
+func (c *UserTCPConn) noHandshakeShit() bool {
+	if c.isServerEnd {
+		if c.remainFirstBufLen > 0 {
+			return false
+		}
+
+	} else if c.version == 0 {
+		if !c.isntFirstPacket {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *UserTCPConn) CanSpliceRead() (bool, *net.TCPConn, *net.UnixConn) {
+
+	if c.noHandshakeShit() {
+		return netLayer.ReturnSpliceRead(c.Conn)
+
+	}
+	return false, nil, nil
+}
+
+func (c *UserTCPConn) EverPossibleToSpliceWrite() bool {
+
+	if netLayer.IsTCP(c.Conn) != nil {
 		return true
 	}
 	if s, ok := c.Conn.(netLayer.Splicer); ok {
-		return s.EverPossibleToSplice()
+		return s.EverPossibleToSpliceWrite()
 	}
 	return false
 }
 
-func (c *UserTCPConn) CanSplice() (r bool, conn net.Conn) {
+func (c *UserTCPConn) CanSpliceWrite() (r bool, conn *net.TCPConn) {
 
 	if !c.canDirectWrite() {
 		return
 	}
 
-	if netLayer.IsBasicConn(c.Conn) {
+	if tc := netLayer.IsTCP(c.Conn); tc != nil {
 		r = true
-		conn = c.Conn
+		conn = tc
 
 	} else if s, ok := c.Conn.(netLayer.Splicer); ok {
-		r, conn = s.CanSplice()
+		r, conn = s.CanSpliceWrite()
 	}
 
 	return
-}
-
-func (c *UserTCPConn) WillReadBuffersBenifit() bool {
-	return c.rr != nil || c.mr != nil
 }
 
 func (c *UserTCPConn) WriteBuffers(buffers [][]byte) (int64, error) {
@@ -90,9 +128,9 @@ func (c *UserTCPConn) WriteBuffers(buffers [][]byte) (int64, error) {
 
 			return utils.BuffersWriteTo(buffers, c.Conn)
 
-		} else if mr, ok := c.Conn.(utils.MultiWriter); ok {
+		} else if c.mw != nil {
 
-			return mr.WriteBuffers(buffers)
+			return c.mw.WriteBuffers(buffers)
 		}
 	}
 	//发现用tls时，下面的 MergeBuffers然后一起写入的方式，能提供巨大的性能提升
@@ -108,8 +146,6 @@ func (c *UserTCPConn) WriteBuffers(buffers [][]byte) (int64, error) {
 
 }
 
-//如果是udp，则是多线程不安全的，如果是tcp，则安不安全看底层的链接。
-// 这里规定，如果是UDP，则 每Write一遍，都要Write一个 完整的UDP 数据包
 func (c *UserTCPConn) Write(p []byte) (int, error) {
 
 	if c.version == 0 {
@@ -156,13 +192,13 @@ func (c *UserTCPConn) Write(p []byte) (int, error) {
 	}
 }
 
-//专门适用于 裸奔splice的情况
+// 专门适用于 裸奔splice的情况
 func (c *UserTCPConn) ReadFrom(r io.Reader) (written int64, err error) {
 
 	return netLayer.TryReadFrom_withSplice(c, c.Conn, r, c.canDirectWrite)
 }
 
-//如果是udp，则是多线程不安全的，如果是tcp，则安不安全看底层的链接。
+// 如果是udp，则是多线程不安全的，如果是tcp，则安不安全看底层的链接。
 // 这里规定，如果是UDP，则 每次 Read 得到的都是一个 完整的UDP 数据包，除非p给的太小……
 func (c *UserTCPConn) Read(p []byte) (int, error) {
 
@@ -222,46 +258,46 @@ func (c *UserTCPConn) Read(p []byte) (int, error) {
 	}
 }
 
-func (c *UserTCPConn) ReadBuffers() (bs [][]byte, err error) {
+func (c *UserTCPConn) WillReadBuffersBenifit() int {
 
-	if !c.isServerEnd {
-
-		if c.version == 0 && !c.isntFirstPacket {
-
-			c.isntFirstPacket = true
-
-			packet := utils.GetPacket()
-			var n int
-			n, err = c.Read(packet)
-			if err != nil {
-				utils.PutPacket(packet)
-				return
-			}
-			if n < 2 {
-				utils.PutPacket(packet)
-				return nil, errors.New("vless response head too short")
-			}
-			bs = append(bs, packet[2:n])
-			return
-
-		} else {
-
-			return netLayer.ReadBuffersFrom(c.Conn, c.rr, c.mr)
-
-		}
-
-	} else {
-
-		if c.remainFirstBufLen > 0 { //firstPayload 已经被最开始的main.go 中的 Read读掉了，所以 在调用 ReadBuffers 时 c.remainFirstBufLen 一般为 0, 所以一般不会调用这里
-
-			return netLayer.ReadBuffersFrom(c.optionalReader, nil, nil)
-
-		} else {
-
-			return netLayer.ReadBuffersFrom(c.Conn, c.rr, c.mr)
-
-		}
-
+	if c.readvType == -1 || c.readvType == 2 { //底层连接为原始链接，或者Readver时, 我们用Readv
+		return 2
+	}
+	if c.readvType == 1 { //底层连接为 BuffersReader 时，我们用 BuffersReader
+		return 1
 	}
 
+	return 0
+
+}
+
+func (c *UserTCPConn) CanMultiRead() bool {
+
+	switch c.readvType {
+	case -1:
+		return c.noHandshakeShit()
+	case 1, 2:
+		if c.noHandshakeShit() {
+			if c.Conn.(utils.MultiReader).CanMultiRead() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *UserTCPConn) GetRawForReadv() syscall.RawConn {
+	if c.rr != nil {
+		return c.rr
+	} else {
+		return c.Conn.(utils.Readver).GetRawForReadv()
+	}
+}
+
+func (c *UserTCPConn) ReadBuffers() (bs [][]byte, err error) {
+	return c.br.ReadBuffers()
+}
+
+func (c *UserTCPConn) PutBuffers(bs [][]byte) {
+	c.br.PutBuffers(bs)
 }

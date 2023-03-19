@@ -16,11 +16,13 @@ func init() {
 	proxy.RegisterClient(Name, ClientCreator{})
 }
 
-type ClientCreator struct{}
+type ClientCreator struct{ proxy.CreatorCommonStruct }
 
-func (ClientCreator) NewClientFromURL(u *url.URL) (proxy.Client, error) {
-
-	return &Client{}, nil
+func (ClientCreator) URLToDialConf(u *url.URL, dc *proxy.DialConf, format int) (*proxy.DialConf, error) {
+	if dc == nil {
+		dc = &proxy.DialConf{}
+	}
+	return dc, nil
 }
 
 func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
@@ -32,6 +34,9 @@ type Client struct {
 	proxy.Base
 }
 
+func (*Client) GetCreator() proxy.ClientCreator {
+	return ClientCreator{}
+}
 func (c *Client) Name() string {
 	return Name
 }
@@ -39,10 +44,10 @@ func (c *Client) Name() string {
 func WriteAddrToBuf(target netLayer.Addr, buf *bytes.Buffer) {
 	if len(target.IP) > 0 {
 		if ip4 := target.IP.To4(); ip4 == nil {
-			buf.WriteByte(netLayer.AtypIP6)
+			buf.WriteByte(ATypIP6)
 			buf.Write(target.IP)
 		} else {
-			buf.WriteByte(netLayer.AtypIP4)
+			buf.WriteByte(ATypIP4)
 			buf.Write(ip4)
 		}
 	} else if l := len(target.Name); l > 0 {
@@ -97,6 +102,6 @@ func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, tar
 		return uc, nil
 
 	} else {
-		return uc, uc.WriteMsgTo(firstPayload, target)
+		return uc, uc.WriteMsg(firstPayload, target)
 	}
 }

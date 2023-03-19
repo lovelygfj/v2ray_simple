@@ -2,11 +2,11 @@ package proxy
 
 import (
 	"crypto/tls"
-	"net"
-	"net/url"
 
 	"github.com/e1732a364fed/v2ray_simple/advLayer"
 	"github.com/e1732a364fed/v2ray_simple/tlsLayer"
+	"github.com/e1732a364fed/v2ray_simple/utils"
+	"go.uber.org/zap"
 )
 
 func updateAlpnListByAdvLayer(com BaseInterface, alpnList []string) (result []string) {
@@ -47,7 +47,7 @@ func updateAlpnListByAdvLayer(com BaseInterface, alpnList []string) (result []st
 	return
 }
 
-//use dc.Host, dc.Insecure, dc.Utls, dc.Alpn.
+// use dc.Host, dc.Insecure, dc.Utls, dc.Alpn.
 func prepareTLS_forClient(com BaseInterface, dc *DialConf) error {
 	alpnList := updateAlpnListByAdvLayer(com, dc.Alpn)
 
@@ -63,13 +63,24 @@ func prepareTLS_forClient(com BaseInterface, dc *DialConf) error {
 			KeyFile:  dc.TLSKey,
 		}
 	}
-	var minVer uint16 = tlsLayer.GetMinVerFromExtra(dc.Extra)
 
-	clic.Tls_c = tlsLayer.NewClient(dc.Host, dc.Insecure, dc.Utls, alpnList, certConf, minVer)
+	conf := tlsLayer.Conf{
+		Host:         dc.Host,
+		Insecure:     dc.Insecure,
+		Tls_type:     tlsLayer.StrToType(dc.TlsType),
+		AlpnList:     alpnList,
+		CertConf:     certConf,
+		Minver:       getTlsMinVerFromExtra(dc.Extra),
+		Maxver:       getTlsMaxVerFromExtra(dc.Extra),
+		CipherSuites: getTlsCipherSuitesFromExtra(dc.Extra),
+		Extra:        dc.Extra,
+	}
+
+	clic.Tls_c = tlsLayer.NewClient(conf)
 	return nil
 }
 
-//use lc.Host, lc.TLSCert, lc.TLSKey, lc.Insecure, lc.Alpn.
+// use lc.Host, lc.TLSCert, lc.TLSKey, lc.Insecure, lc.Alpn, lc.Extra
 func prepareTLS_forServer(com BaseInterface, lc *ListenConf) error {
 
 	serc := com.GetBase()
@@ -79,56 +90,121 @@ func prepareTLS_forServer(com BaseInterface, lc *ListenConf) error {
 
 	alpnList := updateAlpnListByAdvLayer(com, lc.Alpn)
 
-	var minVer uint16 = tlsLayer.GetMinVerFromExtra(lc.Extra)
+	conf := tlsLayer.Conf{
+		Host: lc.Host,
+		CertConf: &tlsLayer.CertConf{
+			CertFile: lc.TLSCert, KeyFile: lc.TLSKey, CA: lc.CA,
+		},
+		Tls_type: tlsLayer.StrToType(lc.TlsType),
 
-	tlsserver, err := tlsLayer.NewServer(lc.Host, &tlsLayer.CertConf{
-		CertFile: lc.TLSCert, KeyFile: lc.TLSKey, CA: lc.CA,
-	}, lc.Insecure, alpnList, minVer)
+		Insecure: lc.Insecure,
+		AlpnList: alpnList,
+		Minver:   getTlsMinVerFromExtra(lc.Extra),
+		Maxver:   getTlsMaxVerFromExtra(lc.Extra),
+
+		RejectUnknownSni: getTlsRejectUnknownSniFromExtra(lc.Extra),
+		CipherSuites:     getTlsCipherSuitesFromExtra(lc.Extra),
+		Extra:            lc.Extra,
+	}
+
+	tlsserver, err := tlsLayer.NewServer(conf)
 
 	if err == nil {
 		serc.Tls_s = tlsserver
+		serc.TlsConf = conf
 	} else {
 		return err
 	}
 	return nil
 }
 
-//给 ProxyCommon 的tls做一些配置上的准备，从url读取配置
-func prepareTLS_forProxyCommon_withURL(u *url.URL, isclient bool, com BaseInterface) error {
-	q := u.Query()
-	insecureStr := q.Get("insecure")
-	insecure := false
-	if insecureStr != "" && insecureStr != "false" && insecureStr != "0" {
-		insecure = true
-	}
-	cc := com.GetBase()
-
-	if isclient {
-		utlsStr := q.Get("utls")
-		useUtls := utlsStr != "" && utlsStr != "false" && utlsStr != "0"
-
-		if cc != nil {
-			cc.Tls_c = tlsLayer.NewClient(u.Host, insecure, useUtls, nil, nil, tls.VersionTLS13)
-
-		}
-
-	} else {
-		certFile := q.Get("cert")
-		keyFile := q.Get("key")
-
-		hostAndPort := u.Host
-		sni, _, _ := net.SplitHostPort(hostAndPort)
-
-		tlsserver, err := tlsLayer.NewServer(sni, &tlsLayer.CertConf{
-			CertFile: certFile, KeyFile: keyFile,
-		}, insecure, nil, tls.VersionTLS13)
-		if err == nil {
-			if cc != nil {
-				cc.Tls_s = tlsserver
+func getTlsMinVerFromExtra(extra map[string]any) uint16 {
+	if len(extra) > 0 {
+		if thing := extra["tls_minVersion"]; thing != nil {
+			if str, ok := (thing).(string); ok && len(str) > 0 {
+				switch str {
+				case "1.2":
+					return tls.VersionTLS12
+				}
 			}
-		} else {
-			return err
 		}
 	}
+
+	return tls.VersionTLS13
+}
+
+func getTlsMaxVerFromExtra(extra map[string]any) uint16 {
+
+	fromStr := func(str string) uint16 {
+		switch str {
+		case "1.2":
+			return tls.VersionTLS12
+		case "1.3":
+			return tls.VersionTLS13
+		default:
+			if ce := utils.CanLogErr("parse tls version failed"); ce != nil {
+				ce.Write(zap.String("given", str))
+			}
+			return tls.VersionTLS13
+		}
+	}
+
+	if len(extra) > 0 {
+		if thing := extra["tls_maxVersion"]; thing != nil {
+			if str, ok := (thing).(string); ok && len(str) > 0 {
+				return fromStr(str)
+			}
+		}
+	}
+
+	return tls.VersionTLS13
+}
+
+func getTlsRejectUnknownSniFromExtra(extra map[string]any) bool {
+	if len(extra) > 0 {
+		if thing := extra["rejectUnknownSni"]; thing != nil {
+			if is, ok := utils.AnyToBool(thing); ok && is {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func getTlsCipherSuitesFromExtra(extra map[string]any) []uint16 {
+	if len(extra) > 0 {
+		if thing := extra["tls_cipherSuites"]; thing != nil {
+			if is, ok := utils.AnyToUInt16Array(thing); ok && len(is) > 0 {
+				return is
+			}
+			if strs, ok := thing.([]string); ok {
+				var v []uint16
+				for _, s := range strs {
+					cs := tlsLayer.StrToCipherSuite(s)
+					if cs > 0 {
+						v = append(v, cs)
+					}
+				}
+				if len(v) > 0 {
+					return v
+				}
+			} else {
+				if things, ok := thing.([]any); ok {
+					var v []uint16
+					for _, s := range things {
+						cs := tlsLayer.StrToCipherSuite(s.(string))
+						if cs > 0 {
+							v = append(v, cs)
+						}
+					}
+					if len(v) > 0 {
+						return v
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }

@@ -11,8 +11,8 @@ host = "127.0.0.1"
 port = 4434
 version = 0
 insecure = true
-utls = true
-advancedLayer = "grpc"  # grpc也可应用我们的http header
+tls_type = "utls"
+adv = "grpc"  # grpc也可应用我们的http header
 
 path = "verysimple_serviceName"
 

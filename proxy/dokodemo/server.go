@@ -1,4 +1,5 @@
-/*Package dokodemo implements a dokodemo-door proxy.Server.
+/*
+Package dokodemo implements a dokodemo-door proxy.Server.
 
 Server that wants to relay data to a dokodemo target address.
 
@@ -6,13 +7,13 @@ dokodemo 是 v2ray的 dokodemo-door 协议的实现。不含透明代理功能�
 
 严格来说 dokodemo-door 并不是一个 "协议", 而是一个预先指定目标的转发方式。
 
-dokodemo 是 listen端, 监听一个普通的tcp端口，试图将一切流量转发到特定的预定义的地址. 并不是直接连接，而是转发到dial。
+dokodemo 是 listen端, 监听一个普通的tcp/udp端口，试图将一切流量转发到特定的预定义的地址. 并不是直接连接，而是转发到dial。
 
 dokodemo 属于 “单目标”代理，而其它proxy.Server 一般都属于 “泛目标”代理。
 
 内部实际上就是 指定了目标的 纯tcp/udp协议，属于监听协议中最简单、最纯粹的一种。
 
-Example 应用例子
+# Example 应用例子
 
 使用 dokodemo 做监听，用direct 拨号，指定一个target，那么实际上就是把 该监听的节点 与远程target间建立了一个信道;
 
@@ -39,7 +40,6 @@ package dokodemo
 import (
 	"net"
 	"net/url"
-	"strconv"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/proxy"
@@ -52,42 +52,14 @@ func init() {
 	proxy.RegisterServer(name, &ServerCreator{})
 }
 
-type ServerCreator struct{}
+type ServerCreator struct{ proxy.CreatorCommonStruct }
 
-// 用如下参数形式： network=tcp&target=127.0.0.1&target_port=80
-func (ServerCreator) NewServerFromURL(url *url.URL) (proxy.Server, error) {
-
-	nStr := url.Query().Get("network")
-	if nStr == "" {
+func (ServerCreator) URLToListenConf(url *url.URL, lc *proxy.ListenConf, format int) (*proxy.ListenConf, error) {
+	if lc == nil {
 		return nil, utils.ErrNilParameter
 	}
-	targetStr := url.Query().Get("target")
-	if targetStr == "" {
-		return nil, utils.ErrNilParameter
-	}
-	ip := net.ParseIP(targetStr)
-	name := ""
-	if ip == nil {
-		name = targetStr
-	}
 
-	target_portStr := url.Query().Get("target_port")
-	if target_portStr == "" {
-		return nil, utils.ErrNilParameter
-	}
-	port, err := strconv.Atoi(targetStr)
-	if err != nil || port <= 0 || port > 65535 {
-		return nil, utils.ErrWrongParameter
-	}
-	s := &Server{
-		targetAddr: netLayer.Addr{
-			Network: nStr,
-			IP:      ip,
-			Name:    name,
-			Port:    port,
-		},
-	}
-	return s, nil
+	return lc, nil
 }
 
 // use lc.TargetAddr
@@ -102,7 +74,7 @@ func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 	return s, nil
 }
 
-//implements proxy.Server
+// implements proxy.Server
 type Server struct {
 	proxy.Base
 

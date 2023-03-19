@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/e1732a364fed/v2ray_simple/advLayer"
 	"github.com/e1732a364fed/v2ray_simple/httpLayer"
@@ -17,16 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// 2048 /3 = 682.6666...  (682 又 三分之二),
-// 683 * 4 = 2732, 若你不信，运行 we_test.go中的 TestBase64Len
-const MaxEarlyDataLen_Base64 = 2732
-
 var (
 	connectionBs = []byte("Connection")
 	upgradeBs    = []byte("Upgrade")
 )
 
-//implements advLayer.SingleServer
+// implements advLayer.SingleServer
 type Server struct {
 	Creator
 	UseEarlyData   bool
@@ -38,8 +35,11 @@ type Server struct {
 	responseHeader              ws.HandshakeHeader
 }
 
-// 这里默认: 传入的path必须 以 "/" 为前缀. 本函数 不对此进行任何检查.
+// 这里默认: 传入的path必须 以 "/" 为前缀. 若path为空，本函数 将自动使用 "/"
 func NewServer(path string, headers *httpLayer.HeaderPreset, UseEarlyData bool) *Server {
+	if path == "" {
+		path = "/"
+	}
 
 	noNeedToCheckRequestHeaders := headers == nil || headers.Request == nil || len(headers.Request.Headers) == 0
 
@@ -98,15 +98,27 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 	//我们目前只支持 ws on http1.1
 
 	var rp httpLayer.H1RequestParser
-	re := rp.ReadAndParse(underlay)
+	re := rp.ReadAndParse_2(underlay)
 	if re != nil {
 		if errors.Is(re, httpLayer.ErrNotHTTP_Request) {
 
-			return nil, utils.ErrInErr{ErrDesc: "WS check parse http failed", ErrDetail: httpLayer.ErrNotHTTP_Request}
+			if rp.Failreason == httpLayer.Fail_no_endMark && s.UseEarlyData {
+				//Fail_no_endMark 是没有读到http尾部的错误，在earlyData开启时是可能存在的，一次读取到的数据不够长，没法完整表达整个http头时就会有这种情况。
+
+				if ce := utils.CanLogDebug("ws, check http Fail_no_endMark"); ce != nil {
+					ce.Write(zap.Int("len", rp.WholeRequestBuf.Len()), zap.String("header", rp.WholeRequestBuf.String()))
+				}
+
+			} else {
+				return nil, utils.ErrInErr{ErrDesc: "Failed in WS check parse http", ErrDetail: re, ExtraIs: []error{httpLayer.ErrNotHTTP_Request}, Data: rp.Failreason}
+
+				//return nil, utils.ErrInErr{ErrDesc: "Failed in WS check parse http", ErrDetail: re, Data: rp.WholeRequestBuf.String(), ExtraIs: []error{httpLayer.ErrNotHTTP_Request}}
+
+			}
 
 		} else {
 
-			return nil, utils.ErrInErr{ErrDesc: "WS check handshake read failed", ErrDetail: re}
+			return nil, utils.ErrInErr{ErrDesc: "Failed in WS check handshake read", ErrDetail: re}
 
 		}
 	}
@@ -114,6 +126,8 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 	optionalFirstBuffer := rp.WholeRequestBuf
 
 	notWsRequest := false
+	notReason := ""
+	var realAddr net.Addr
 
 	//因为 gobwas 会先自行给错误的连接 返回 错误信息，而这不行，所以我们先过滤一遍。
 	//header 我们只过滤一个 connection 就行. 要是怕攻击者用 “对的path,method 和错误的header” 进行探测,
@@ -121,9 +135,14 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 
 	if rp.Method != "GET" || s.Thepath != rp.Path || len(rp.Headers) == 0 {
 		notWsRequest = true
+		notReason = `rp.Method != "GET" || s.Thepath != rp.Path || len(rp.Headers) == 0`
 
 	} else {
+		//不在这里检查header，可以让后面ws部分检查一下X-forwarded-for 找出实际客户端地址
+		//但是必须要在这里检查header，所以也在这里检查 X-forwarded-for
+
 		hasUpgrade := false
+		gotXForward := false
 		for _, rh := range rp.Headers {
 			httpLayer.CanonicalizeHeaderKey(rh.Head)
 			if bytes.Equal(rh.Head, connectionBs) {
@@ -132,12 +151,35 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 				if bytes.Equal(rh.Value, upgradeBs) {
 
 					hasUpgrade = true
-					break
+					if gotXForward {
+						break
+					}
 				}
 			}
+
+			if string(rh.Head) == httpLayer.XForwardStr {
+				gotXForward = true
+
+				realV := string(rh.Value)
+				xffs := strings.SplitN(realV, ",", 2)
+
+				if len(xffs) > 0 {
+					ta, e := net.ResolveIPAddr("ip", strings.TrimSpace(xffs[0]))
+					if e == nil {
+						realAddr = ta
+					} else {
+						if ce := utils.CanLogWarn("Failed in ws parse X-Forwarded-For"); ce != nil {
+							ce.Write(zap.Error(e), zap.Any(httpLayer.XForwardStr, xffs))
+						}
+					}
+				}
+
+			}
+
 		}
 		if !hasUpgrade {
 			notWsRequest = true
+			notReason = "has no upgrade field"
 		}
 
 	}
@@ -148,6 +190,8 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 			H1RequestBuf: optionalFirstBuffer,
 			Path:         rp.Path,
 			Method:       rp.Method,
+			Reason:       notReason,
+			XFF:          realAddr,
 		}, httpLayer.ErrShouldFallback
 	}
 
@@ -159,19 +203,22 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 
 		//因为我们vs的架构，先统一监听tcp；然后再调用Handshake函数
 		// 所以我们不能直接用http.Handle, 这也彰显了 用 gobwas/ws 包的好处
-		// 给Upgrader提供的 OnRequest 专门用于过滤 path, 也不一定 需要我们的 httpLayer 去过滤
 
-		// 我们的 httpLayer 的 过滤方法仍然是最安全的，可以杜绝 所有非法数据；
+		// 给Upgrader提供的 OnRequest 成员 是 专门用于过滤 path 的, 也不一定 需要我们的 httpLayer 去过滤
+
+		// 但是 我们的 httpLayer 的 过滤方法仍然是最安全的，可以杜绝 所有非法数据；
 		// 而 ws.Upgrader.Upgrade 使用了 readLine 函数。如果客户提供一个非法的超长的一行的话，它就会陷入泥淖
 
 		//我们这里就是先用 httpLayer 过滤 再和 buffer一起传入 ws 包
 		// ReadBufferSize默认是 4096，已经够大
 
 		OnHeader: func(key, value []byte) error {
+			sk := string(key)
+
 			if s.noNeedToCheckRequestHeaders {
 				return nil
 			}
-			vs := s.RequestHeaders[string(key)]
+			vs := s.RequestHeaders[sk]
 			if len(vs) > 0 {
 				for _, v := range vs {
 					if v == (string(value)) {
@@ -186,7 +233,7 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 		Header: s.responseHeader,
 		OnBeforeUpgrade: func() (header ws.HandshakeHeader, err error) {
 			if requestHeaderNotGivenCount > 0 {
-				if ce := utils.CanLogWarn("ws headers not match"); ce != nil {
+				if ce := utils.CanLogWarn("WS headers not match"); ce != nil {
 					ce.Write(zap.Int("requestHeaderNotGivenCount", requestHeaderNotGivenCount))
 				}
 				return nil, ws.RejectConnectionError(ws.RejectionStatus(http.StatusBadRequest))
@@ -214,6 +261,10 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 			//还有要注意的是，因为这个是回调函数，所以需要是闭包 才能向我们实际连接储存数据，所以是无法直接放到通用的upgrader里的
 
 			if len(b) > MaxEarlyDataLen_Base64 {
+				if ce := utils.CanLogWarn("WS len of Sec-WebSocket-Protocol exceeds limit"); ce != nil {
+					ce.Write(zap.Int("len", len(b)))
+				}
+
 				return "", true
 			}
 			bs, err := base64.RawURLEncoding.DecodeString(string(b))
@@ -245,14 +296,17 @@ func (s *Server) Handshake(underlay net.Conn) (net.Conn, error) {
 			H1RequestBuf: optionalFirstBuffer,
 			Path:         rp.Path,
 			Method:       rp.Method,
+			Reason:       err.Error(),
+			XFF:          realAddr,
 		}, httpLayer.ErrShouldFallback
 	}
 
 	theConn := &Conn{
-		Conn:            underlay,
-		underlayIsBasic: netLayer.IsBasicConn(underlay),
-		state:           ws.StateServerSide,
-		r:               wsutil.NewServerSideReader(underlay),
+		Conn:          underlay,
+		underlayIsTCP: netLayer.IsTCP(underlay) != nil,
+		state:         ws.StateServerSide,
+		r:             wsutil.NewServerSideReader(underlay),
+		realRaddr:     realAddr,
 	}
 	//不想客户端；服务端是不怕客户端在握手阶段传来任何多余数据的
 	// 因为我们还没实现 0-rtt

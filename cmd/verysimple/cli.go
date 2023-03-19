@@ -1,134 +1,116 @@
+//go:build !nocli
+
 package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/asaskevich/govalidator"
-	vs "github.com/e1732a364fed/v2ray_simple"
+	"github.com/e1732a364fed/v2ray_simple/machine"
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/proxy"
-	"github.com/e1732a364fed/v2ray_simple/proxy/trojan"
-	"github.com/e1732a364fed/v2ray_simple/proxy/vless"
-	"github.com/e1732a364fed/v2ray_simple/tlsLayer"
 	"github.com/e1732a364fed/v2ray_simple/utils"
 	"github.com/manifoldco/promptui"
 )
 
-var cliCmdList = []CliCmd{
-	{
-		"生成随机ssl证书", func() {
-			const certFn = "cert.pem"
-			const keyFn = "cert.key"
-			if utils.FileExist(certFn) {
-				utils.PrintStr(certFn)
-				utils.PrintStr(" 已存在！\n")
-				return
-			}
-
-			if utils.FileExist(keyFn) {
-				utils.PrintStr(keyFn)
-				utils.PrintStr(" 已存在！\n")
-				return
-			}
-
-			err := tlsLayer.GenerateRandomCertKeyFiles(certFn, keyFn)
-			if err == nil {
-				utils.PrintStr("生成成功！请查看目录中的 ")
-				utils.PrintStr(certFn)
-				utils.PrintStr(" 和 ")
-				utils.PrintStr(keyFn)
-				utils.PrintStr("\n")
-
-			} else {
-
-				utils.PrintStr("生成失败,")
-				utils.PrintStr(err.Error())
-				utils.PrintStr("\n")
-
-			}
-		},
-	},
-}
-
-func init() {
-
-	//cli.go 中定义的 CliCmd都是需进一步交互的命令
-
-	cliCmdList = append(cliCmdList, CliCmd{
-		"交互生成配置，超级强大", func() {
-			generateConfigFileInteractively()
-		},
-	})
-	cliCmdList = append(cliCmdList, CliCmd{
-		"热删除配置", func() {
-			interactively_hotRemoveServerOrClient()
-		},
-	})
-	cliCmdList = append(cliCmdList, CliCmd{
-		"热加载新配置文件", func() {
-			interactively_hotLoadConfigFile()
-		},
-	})
-	cliCmdList = append(cliCmdList, CliCmd{
-		"调节日志等级", func() {
-			interactively_adjust_loglevel()
-		},
-	})
-
-}
+//cli = command line interface
 
 type CliCmd struct {
 	Name string
-	F    func()
+	f    func()
 }
 
 func (cc CliCmd) String() string {
 	return cc.Name
 }
 
-//交互式命令行用户界面
+func flist(list []*CliCmd) (result []func()) {
+	for _, v := range list {
+		result = append(result, v.f)
+	}
+	return
+}
+
+// cliCmdList 包含所有交互模式中可执行的命令；
+// 本文件 中添加的 CliCmd都是直接返回运行结果的、无需进一步交互的命令
+var cliCmdList = []*CliCmd{
+	{
+		"查询当前状态", func() {
+			mainM.PrintAllState(os.Stdout, false)
+		},
+	}, {
+		"打印当前版本所支持的所有协议", printSupportedProtocols,
+	}, {
+		"生成随机ssl证书", generateRandomSSlCert,
+	}, {
+		"生成一个随机的uuid供你参考", generateAndPrintUUID,
+	}, {
+		"下载geosite文件夹", tryDownloadGeositeSource,
+	}, {
+		"下载geoip文件(GeoLite2-Country.mmdb)", tryDownloadMMDB,
+	},
+}
+
+func init() {
+	flag.BoolVar(&interactive_mode, "i", false, "enable interactive commandline mode")
+
+	//cli.go 中添加的 CliCmd都是需进一步交互的命令
+
+	cliCmdList = append(cliCmdList, &CliCmd{
+		"【生成分享链接】<-当前的配置", func() {
+			sc := mainM.DumpStandardConf()
+			interactively_generate_share(&sc)
+		},
+	}, &CliCmd{
+		"【导出标准配置文件】<-当前全部配置", interactively_exportVsConf,
+	}, &CliCmd{
+		"【交互生成配置】，超级强大", func() { generateConfigFileInteractively(mainM) },
+	}, &CliCmd{
+		"热删除配置", func() { interactively_hotRemoveServerOrClient(mainM) },
+	}, &CliCmd{
+		"【热加载】新配置文件", func() { interactively_hotLoadConfigFile(mainM) },
+	}, &CliCmd{
+		"【热加载】新配置url", func() { interactively_hotLoadUrlConfig(mainM) },
+	}, &CliCmd{
+		"调节日志等级", interactively_adjust_loglevel,
+	})
+
+	runCli = runCli_func
+}
+
+// 交互式命令行用户界面
 //
-//阻塞，可按ctrl+C退出或回退到上一级
-func runCli() {
+// 阻塞，可按ctrl+C退出或回退到上一级
+func runCli_func() {
 	defer func() {
 		utils.PrintStr("Interactive Mode exited. \n")
 		if ce := utils.CanLogInfo("Interactive Mode exited"); ce != nil {
 			ce.Write()
 		}
+
+		savePerferences()
 	}()
 
-	/*
-		langList := []string{"简体中文", "English"}
-		utils.PrintStr("Welcome to Interactive Mode, please choose a Language \n")
-		Select := promptui.Select{
-			Label: "Select Language",
-			Items: langList,
-		}
+	loadPreferences()
 
-		_, result, err := Select.Run()
+	searcher := func(input string, index int) bool {
+		pepper := cliCmdList[index]
+		name := strings.Replace(strings.ToLower(pepper.Name), " ", "", -1)
+		input = strings.Replace(strings.ToLower(input), " ", "", -1)
 
-		if err != nil {
-			fmt.Printf("Prompt failed %v\n", err)
-			return
-		}
-
-		fmt.Printf("You choose %q\n", result)
-
-		if result != langList[0] {
-			utils.PrintStr("Sorry, language not supported yet \n")
-			return
-		}
-	*/
+		return strings.Contains(name, input)
+	}
 
 	for {
 		Select := promptui.Select{
-			Label: "请选择想执行的功能",
-			Items: cliCmdList,
+			Label:    "请选择想执行的功能",
+			Items:    cliCmdList,
+			Searcher: searcher,
 		}
 
 		i, result, err := Select.Run()
@@ -140,22 +122,29 @@ func runCli() {
 
 		fmt.Printf("你选择了 %s\n", result)
 
-		if f := cliCmdList[i].F; f != nil {
+		if f := cliCmdList[i].f; f != nil {
 			f()
 		}
+
+		if cp := currentUserPreference.Cli; cp != nil {
+			if cp.AutoArrange {
+				updateMostRecentCli(i)
+			}
+		}
+
 	}
 
 }
 
-func generateConfigFileInteractively() {
+func generateConfigFileInteractively(m *machine.M) {
 
 	rootLevelList := []string{
-		"打印当前缓存的配置",
-		"开始交互生成配置",
-		"清除此次缓存的配置",
-		"将该缓存的配置写到文件(client.toml和 server.toml)",
-		"以该缓存的配置【生成客户端分享链接url】",
-		"将此次生成的配置投入运行（热加载）",
+		"【打印】当前缓存的配置",
+		"【开始交互生成】配置",
+		"【清除】此次缓存的配置",
+		"【写到文件】<-将该缓存的配置 (client.toml和 server.toml)",
+		"【生成分享】链接url <-该缓存的配置",
+		"【投入运行】（热加载) <-将此次生成的配置",
 	}
 
 	confClient := proxy.StandardConf{}
@@ -185,9 +174,12 @@ func generateConfigFileInteractively() {
 				Domains: []string{"geosite:cn"},
 			}}
 
-			confClient.App = &proxy.AppConf{MyCountryISO_3166: "CN"}
+			var vsConfClient machine.VSConf = machine.VSConf{
+				AppConf:      &machine.AppConf{MyCountryISO_3166: "CN"},
+				StandardConf: confClient,
+			}
 
-			clientStr, err = utils.GetPurgedTomlStr(confClient)
+			clientStr, err = utils.GetPurgedTomlStr(&vsConfClient)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -215,6 +207,9 @@ func generateConfigFileInteractively() {
 			utils.PrintStr(buf.String())
 
 			utils.PutBuf(buf)
+
+		case 1:
+			interactively_generateConf(&confClient, &confServer)
 
 		case 2: //clear
 			confClient = proxy.StandardConf{}
@@ -249,17 +244,7 @@ func generateConfigFileInteractively() {
 
 				utils.PrintStr("生成的分享链接如下：\n")
 
-				for _, d := range confClient.Dial {
-					switch d.Protocol {
-					case vless.Name:
-						utils.PrintStr(vless.GenerateXrayShareURL(d))
-						utils.PrintStr("\n")
-
-					case trojan.Name:
-						utils.PrintStr(trojan.GenerateOfficialDraftShareURL(d))
-						utils.PrintStr("\n")
-					}
-				}
+				interactively_generate_share(&confClient)
 
 			} else {
 				utils.PrintStr("请先进行配置\n")
@@ -286,328 +271,32 @@ func generateConfigFileInteractively() {
 			switch ihot {
 			case 0:
 
-				hotLoadDialConfForRuntime("", confServer.Dial)
-				hotLoadListenConfForRuntime(confServer.Listen)
+				m.LoadDialConf(confServer.Dial)
+				m.LoadListenConf(confServer.Listen, true)
 
 			case 1:
-				hotLoadDialConfForRuntime("", confClient.Dial)
-				hotLoadListenConfForRuntime(confClient.Listen)
+				m.LoadDialConf(confClient.Dial)
+				m.LoadListenConf(confClient.Listen, true)
 			}
 
 			utils.PrintStr("加载成功！你可以回退(ctrl+c)到上级来使用 【查询当前状态】来查询新增的配置\n")
-
-		case 1: //interactively generate
-
-			select0 := promptui.Select{
-				Label: "【提醒】我们交互模式生成的配置都是直接带tls的,且客户端【默认使用utls】模拟chrome指纹",
-				Items: []string{"知道了"},
-			}
-
-			_, _, err := select0.Run()
-			if err != nil {
-				fmt.Printf("Prompt failed %v\n", err)
-				return
-			}
-
-			select2 := promptui.Select{
-				Label: "请选择你客户端想监听的协议",
-				Items: []string{
-					"socks5",
-					"http",
-				},
-			}
-			i2, result, err := select2.Run()
-
-			if err != nil {
-				fmt.Printf("Prompt failed %v\n", err)
-				return
-			}
-
-			fmt.Printf("你选择了 %s\n", result)
-
-			if i2 < 2 {
-				confClient.Listen = append(confClient.Listen, &proxy.ListenConf{})
-			} else {
-				utils.PrintStr("Prompt failed, werid input")
-				return
-			}
-
-			clientlisten := confClient.Listen[0]
-			clientlisten.Protocol = result
-			clientlisten.Tag = "my_" + result
-
-			var theInt int64
-
-			var canLowPort bool
-			validatePort := func(input string) error {
-				theInt, err = strconv.ParseInt(input, 10, 64)
-				if err != nil {
-					return utils.ErrInvalidNumber
-				}
-				if !canLowPort {
-					if theInt <= 1024 {
-						return utils.ErrInvalidNumber
-					}
-				}
-				if theInt > 65535 {
-					return utils.ErrInvalidNumber
-				}
-				return nil
-			}
-
-			utils.PrintStr("请输入你客户端想监听的端口\n")
-
-			promptPort := promptui.Prompt{
-				Label:    "Port Number",
-				Validate: validatePort,
-			}
-
-			result, err = promptPort.Run()
-
-			if err != nil {
-				fmt.Printf("Prompt failed %v\n", err)
-				return
-			}
-
-			fmt.Printf("你输入了 %d\n", theInt)
-
-			clientlisten.Port = int(theInt)
-			clientlisten.IP = "127.0.0.1"
-
-			select3 := promptui.Select{
-				Label: "请选择你客户端想拨号的协议(与服务端监听协议相同)",
-				Items: []string{
-					"vless",
-					"trojan",
-				},
-			}
-			i3, result, err := select3.Run()
-
-			if err != nil || i3 != 0 {
-				fmt.Println("Prompt failed ", err, i3)
-				return
-			}
-
-			fmt.Printf("你选择了 %s\n", result)
-			theProtocol := result
-
-			confClient.Dial = append(confClient.Dial, &proxy.DialConf{})
-			clientDial := confClient.Dial[0]
-
-			utils.PrintStr("请输入你服务端想监听的端口\n")
-			canLowPort = true
-
-			result, err = promptPort.Run()
-
-			if err != nil {
-				fmt.Printf("Prompt failed %v\n", err)
-				return
-			}
-
-			fmt.Printf("你输入了 %d\n", theInt)
-
-			clientDial.Port = int(theInt)
-			clientDial.Protocol = theProtocol
-			clientDial.TLS = true
-			clientDial.Tag = "my_proxy"
-			clientDial.Utls = true
-
-			select4 := promptui.Select{
-				Label: "请选择你客户端拨号想使用的高级层(与服务端监听的高级层相同)",
-				Items: []string{
-					"无",
-					"ws",
-					"grpc",
-					"quic",
-				},
-			}
-			i4, result, err := select4.Run()
-
-			if err != nil {
-				fmt.Println("Prompt failed ", err, i3)
-				return
-			}
-
-			switch i4 {
-			case 0:
-			default:
-				clientDial.AdvancedLayer = result
-				switch i4 {
-				case 1, 2:
-					clientlisten.Tag += "_" + result
-					promptPath := promptui.Prompt{
-						Label: "Path",
-						Validate: func(s string) error {
-							if result == "ws" && !strings.HasPrefix(s, "/") {
-								return errors.New("ws path must start with /")
-							}
-							return nil
-						},
-					}
-
-					result, err = promptPath.Run()
-					if err != nil {
-						fmt.Println("Prompt failed ", err, result)
-						return
-					}
-
-					fmt.Printf("你输入了 %s\n", result)
-
-					clientDial.Path = result
-
-				}
-			}
-
-			utils.PrintStr("请输入你服务端的ip\n")
-
-			promptIP := promptui.Prompt{
-				Label:    "IP",
-				Validate: utils.WrapFuncForPromptUI(govalidator.IsIP),
-			}
-
-			result, err = promptIP.Run()
-			if err != nil {
-				fmt.Println("Prompt failed ", err, result)
-				return
-			}
-
-			fmt.Printf("你输入了 %s\n", result)
-
-			clientDial.IP = result
-
-			utils.PrintStr("请输入你服务端的域名\n")
-
-			promptDomain := promptui.Prompt{
-				Label:    "域名",
-				Validate: func(s string) error { return nil }, //允许不设域名
-			}
-
-			result, err = promptDomain.Run()
-			if err != nil {
-				fmt.Println("Prompt failed ", err, result)
-				return
-			}
-
-			fmt.Printf("你输入了 %s\n", result)
-
-			clientDial.Host = result
-
-			select5 := promptui.Select{
-				Label: "请选择uuid生成方式",
-				Items: []string{
-					"随机",
-					"手动输入(要保证你输入的是格式正确的uuid)",
-				},
-			}
-			i5, result, err := select5.Run()
-
-			if err != nil {
-				fmt.Println("Prompt failed ", err, i3)
-				return
-			}
-			if i5 == 0 {
-				uuid := utils.GenerateUUIDStr()
-				clientDial.Uuid = uuid
-				fmt.Println("随机生成的uuid为", uuid)
-			} else {
-				promptUUID := promptui.Prompt{
-					Label:    "uuid",
-					Validate: utils.WrapFuncForPromptUI(govalidator.IsUUID),
-				}
-
-				result, err = promptUUID.Run()
-				if err != nil {
-					fmt.Println("Prompt failed ", err, result)
-					return
-				}
-
-				fmt.Printf("你输入了 %s\n", result)
-
-				clientDial.Uuid = result
-			}
-
-			var serverListenStruct proxy.ListenConf
-			serverListenStruct.CommonConf = clientDial.CommonConf
-			serverListenStruct.IP = "0.0.0.0"
-
-			confServer.Listen = append(confServer.Listen, &serverListenStruct)
-
-			confServer.Dial = append(confServer.Dial, &proxy.DialConf{
-				CommonConf: proxy.CommonConf{
-					Protocol: "direct",
-				},
-			})
-
-			serverListen := confServer.Listen[0]
-
-			select6 := promptui.Select{
-				Label: "请配置服务端tls证书路径",
-				Items: []string{
-					"默认(cert.pem和cert.key),此时将自动开启 insecure",
-					"手动输入(要保证你输入的是正确的文件路径)",
-				},
-			}
-			i6, result, err := select6.Run()
-
-			if err != nil {
-				fmt.Println("Prompt failed ", err, i3)
-				return
-			}
-			if i6 == 0 {
-				serverListen.TLSCert = "cert.pem"
-				serverListen.TLSKey = "cert.key"
-				serverListen.Insecure = true
-				clientDial.Insecure = true
-
-				utils.PrintStr("你选择了默认自签名证书, 这是不安全的, 我们不推荐. 所以自动生成证书这一步需要你一会再到交互模式里选择相应选项进行生成。 \n")
-
-			} else {
-				utils.PrintStr("请输入 cert路径\n")
-
-				promptCPath := promptui.Prompt{
-					Label:    "path",
-					Validate: utils.IsFilePath,
-				}
-
-				result, err = promptCPath.Run()
-				if err != nil {
-					fmt.Println("Prompt failed ", err, result)
-					return
-				}
-
-				fmt.Printf("你输入了 %s\n", result)
-
-				serverListen.TLSCert = result
-
-				utils.PrintStr("请输入 key 路径\n")
-
-				result, err = promptCPath.Run()
-				if err != nil {
-					fmt.Println("Prompt failed ", err, result)
-					return
-				}
-
-				fmt.Printf("你输入了 %s\n", result)
-
-				serverListen.TLSKey = result
-			}
 
 		} // switch i case 1
 	} //for
 }
 
-//热删除配置
-func interactively_hotRemoveServerOrClient() {
+// 热删除配置
+func interactively_hotRemoveServerOrClient(m *machine.M) {
 	utils.PrintStr("即将开始热删除配置步骤, 删除正在运行的配置可能有未知风险，谨慎操作\n")
 	utils.PrintStr("【当前所有配置】为：\n")
 	utils.PrintStr(delimiter)
-	printAllState(os.Stdout, true)
+	m.PrintAllState(os.Stdout, false)
 
 	var items []string
-	if len(allServers) > 0 {
+	if m.ServerCount() > 0 {
 		items = append(items, "listen")
 	}
-	if len(allClients) > 0 {
+	if m.ClientCount() > 0 {
 		items = append(items, "dial")
 	}
 	if len(items) == 0 {
@@ -634,15 +323,15 @@ func interactively_hotRemoveServerOrClient() {
 	fmt.Printf("你选择了 %s\n", result)
 	switch i {
 	case 0:
-		if len(allServers) > 0 {
+		if m.ServerCount() > 0 {
 			will_delete_listen = true
 
-		} else if len(allClients) > 0 {
+		} else if m.ClientCount() > 0 {
 			will_delete_dial = true
 		}
 
 	case 1:
-		if len(allServers) > 0 {
+		if m.ServerCount() > 0 {
 			will_delete_dial = true
 
 		}
@@ -650,7 +339,7 @@ func interactively_hotRemoveServerOrClient() {
 
 	var theInt int64
 
-	if (will_delete_dial && len(allClients) > 1) || (will_delete_listen && len(allServers) > 1) {
+	if (will_delete_dial && m.ClientCount() > 1) || (will_delete_listen && m.ServerCount() > 1) {
 
 		validateFunc := func(input string) error {
 			theInt, err = strconv.ParseInt(input, 10, 64)
@@ -658,11 +347,11 @@ func interactively_hotRemoveServerOrClient() {
 				return utils.ErrInvalidNumber
 			}
 
-			if will_delete_dial && int(theInt) >= len(allClients) {
+			if will_delete_dial && int(theInt) >= m.ClientCount() {
 				return errors.New("must with in len of dial array")
 			}
 
-			if will_delete_listen && int(theInt) >= len(allServers) {
+			if will_delete_listen && int(theInt) >= m.ServerCount() {
 				return errors.New("must with in len of listen array")
 			}
 
@@ -690,33 +379,87 @@ func interactively_hotRemoveServerOrClient() {
 	will_delete_index = int(theInt)
 
 	if will_delete_dial {
-		doomedClient := allClients[will_delete_index]
-
-		routingEnv.DelClient(doomedClient.GetTag())
-		doomedClient.Stop()
-		allClients = utils.TrimSlice(allClients, will_delete_index)
+		m.HotDeleteClient(will_delete_index)
 	}
 	if will_delete_listen {
-		listenCloserList[will_delete_index].Close()
-		allServers[will_delete_index].Stop()
-
-		allServers = utils.TrimSlice(allServers, will_delete_index)
-		listenCloserList = utils.TrimSlice(listenCloserList, will_delete_index)
+		m.HotDeleteServer(will_delete_index)
 
 	}
 
 	utils.PrintStr("删除成功！当前状态：\n")
 	utils.PrintStr(delimiter)
-	printAllState(os.Stdout, true)
+	m.PrintAllState(os.Stdout, false)
 }
 
-//热添加配置文件
-func interactively_hotLoadConfigFile() {
+func interactively_hotLoadUrlConfig(m *machine.M) {
+	utils.PrintStr("即将开始热添加url配置\n")
+	Select := promptui.Select{
+		Label: "请选择你的url的格式类型",
+		Items: []string{
+			"vs标准url格式",
+			"协议官方url格式(视代理协议不同而不同)",
+		},
+	}
+	i, result, err := Select.Run()
+
+	if err != nil {
+		fmt.Printf("Prompt failed %v\n", err)
+		return
+	}
+
+	fmt.Printf("你选择了 %s\n", result)
+
+	switch i {
+	case 1:
+		fmt.Printf("目前暂不支持")
+		return
+
+	case 0:
+		Select := promptui.Select{
+			Label: "请选择该url是用于dial还是listen",
+			Items: []string{
+				"dial",
+				"listen",
+			},
+		}
+		i, result, err := Select.Run()
+
+		if err != nil {
+			fmt.Printf("Prompt failed %v\n", err)
+			return
+		}
+		fmt.Printf("你选择了 %s\n", result)
+
+		fmt.Printf("请输入你的配置url\n")
+
+		var theUrlStr string
+
+		fmt.Scanln(&theUrlStr)
+
+		if err != nil {
+			fmt.Printf("Prompt failed %v\n", err)
+			return
+		}
+
+		if i == 0 {
+			m.HotLoadDialUrl(theUrlStr, proxy.UrlFormat)
+
+		} else {
+			m.HotLoadListenUrl(theUrlStr, proxy.UrlFormat)
+
+		}
+		return
+
+	}
+}
+
+// 热添加配置文件
+func interactively_hotLoadConfigFile(m *machine.M) {
 	utils.PrintStr("即将开始热添加配置文件\n")
 	utils.PrintStr("【注意】我们交互模式只支持热添加listen和dial, 对于dns/route/fallback的热增删, 请期待api server未来的实现.\n")
 	utils.PrintStr("【当前所有配置】为：\n")
 	utils.PrintStr(delimiter)
-	printAllState(os.Stdout, false)
+	m.PrintAllState(os.Stdout, false)
 
 	utils.PrintStr("请输入你想添加的文件名称\n")
 
@@ -743,8 +486,7 @@ func interactively_hotLoadConfigFile() {
 
 	fmt.Printf("你输入了 %s\n", fpath)
 
-	var confMode int
-	standardConf, simpleConf, confMode, _, err = proxy.LoadConfig(fpath, "", "", 0)
+	_, err = mainM.LoadConfig(fpath, "", "")
 	if err != nil {
 
 		log.Printf("can not load standard config file: %s\n", err)
@@ -761,38 +503,11 @@ func interactively_hotLoadConfigFile() {
 
 	//也就是说，理论上要写一个比较好的前端，才能妥善解决 复杂条目的热增删问题。
 
-	switch confMode {
-	case proxy.StandardMode:
-		if len(standardConf.Dial) > 0 {
-			hotLoadDialConfForRuntime("", standardConf.Dial)
-
-		}
-
-		if len(standardConf.Listen) > 0 {
-			hotLoadListenConfForRuntime(standardConf.Listen)
-
-		}
-	case proxy.SimpleMode:
-		r, ser := loadSimpleServer()
-		if r < 0 {
-			return
-		}
-
-		r, cli := loadSimpleClient()
-		if r < 0 {
-			return
-		}
-
-		lis := vs.ListenSer(ser, cli, &routingEnv)
-		if lis != nil {
-			listenCloserList = append(listenCloserList, lis)
-		}
-
-	}
+	m.LoadStandardConf()
 
 	utils.PrintStr("添加成功！当前状态：\n")
 	utils.PrintStr(delimiter)
-	printAllState(os.Stdout, false)
+	m.PrintAllState(os.Stdout, false)
 }
 
 func interactively_adjust_loglevel() {

@@ -1,6 +1,7 @@
-/*Package grpcSimple implements grpc tunnel without importing google.golang.org/grpc.
+/*
+Package grpcSimple implements grpc tunnel without importing google.golang.org/grpc.
 
-Reference
+# Reference
 
 https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
 
@@ -10,7 +11,7 @@ https://github.com/Dreamacro/clash/blob/master/transport/gun/gun.go, which is un
 
 本包 在 clash的客户端实现 的 基础上 继续用 golang的 http2包 实现了 grpc 的 基本服务端，并改进了 原代码。
 
-Advantages
+# Advantages
 
 grpcSimple包 比grpc包 小很多，替代grpc包的话，可以减小 4MB 左右的可执行文件大小。但是目前不支持 multiMode。
 
@@ -19,8 +20,9 @@ grpcSimple包 是很棒 很有用的 实现，而且支持  grpc的 path 的回�
 grpc虽然是定义 serviceName的，但是实际上和其他http请求一样，是用的一个path，
 
 path就是  /serviceName/Tun
+之所以叫Tun，只不过是为了兼容xray/v2ray，技术上叫啥都行
 
-Fallback
+# Fallback
 
 grpcSimple can fallback to h2c.
 
@@ -39,7 +41,6 @@ test h2c fallback:
 test http1.1 fallback:
 
 	curl -v --http1.1 -k https://localhost:4434/sfd
-
 */
 package grpcSimple
 
@@ -86,7 +87,7 @@ func (Creator) IsMux() bool {
 
 func getServiceNameFromConf(conf *advLayer.Conf) (serviceName string) {
 	if conf.Path != "" {
-		serviceName = conf.Path
+		serviceName = strings.TrimLeft(conf.Path, "/")
 	} else {
 		serviceName = "GunService"
 	}

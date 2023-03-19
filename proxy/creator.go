@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net"
 	"net/url"
 	"strings"
 
@@ -17,6 +18,14 @@ var (
 		RejectName: RejectCreator{},
 	}
 )
+
+func AllClientTypeList() []string {
+	return utils.GetMapSortedKeySlice(clientCreatorMap)
+}
+
+func AllServerTypeList() []string {
+	return utils.GetMapSortedKeySlice(serverCreatorMap)
+}
 
 func PrintAllServerNames() {
 	utils.PrintStr("===============================\nSupported Proxy Listen protocols:\n")
@@ -35,16 +44,42 @@ func PrintAllClientNames() {
 	}
 }
 
-//可通过两种配置方式来初始化。
-type ClientCreator interface {
-	NewClient(*DialConf) (Client, error)
-	NewClientFromURL(url *url.URL) (Client, error)
+type CreatorCommonStruct struct{}
+
+func (CreatorCommonStruct) MultiTransportLayer() bool {
+	return false
+}
+func (CreatorCommonStruct) AfterCommonConfServer(Server) error { return nil }
+
+type CreatorCommon interface {
+	//若为true，则表明该协议可同时使用tcp和udp来传输数据。direct, socks5 和 shadowsocks 都为true。
+	//此时，是否开启udp取决于Network(), 如果为dual, 则均支持; 如果仅为tcp或者udp，则不支持。
+	// direct的默认Network为dual。
+	MultiTransportLayer() bool
 }
 
-//可通过两种配置方式来初始化。
+// 可通过标准配置或url 来初始化。
+type ClientCreator interface {
+	CreatorCommon
+	//大部分通用内容都会被proxy包解析，方法只需要处理proxy包未知的内容
+	NewClient(*DialConf) (Client, error) //标准配置
+
+	//URLToDialConf 执行proxy自定义的非标准代码;
+	//iv: initial value, can be nil.
+	URLToDialConf(url *url.URL, iv *DialConf, format int) (*DialConf, error)
+	//DialConfToURL(url *DialConf, format int) (*url.URL, error)
+
+}
+
+// 可通过标准配置或url 来初始化。
 type ServerCreator interface {
+	CreatorCommon
+
 	NewServer(*ListenConf) (Server, error)
-	NewServerFromURL(url *url.URL) (Server, error)
+	AfterCommonConfServer(Server) error
+
+	URLToListenConf(url *url.URL, iv *ListenConf, format int) (*ListenConf, error)
+	//ListenConfToURL(url *ListenConf, format int) (*url.URL, error)
 }
 
 // 规定，每个 实现Client的包必须使用本函数进行注册。
@@ -68,19 +103,19 @@ func NewClient(dc *DialConf) (Client, error) {
 	creator, ok := clientCreatorMap[protocol]
 	if ok {
 
-		return newclient(creator, dc, false)
+		return newClient(creator, dc, false)
 	} else {
 		realScheme := strings.TrimSuffix(protocol, "s")
 		creator, ok = clientCreatorMap[realScheme]
 		if ok {
-			return newclient(creator, dc, true)
+			return newClient(creator, dc, true)
 		}
 	}
-	return nil, utils.ErrInErr{ErrDesc: "unknown client protocol ", Data: protocol}
+	return nil, utils.ErrInErr{ErrDesc: "Unknown client protocol ", Data: protocol}
 
 }
 
-func newclient(creator ClientCreator, dc *DialConf, knownTls bool) (Client, error) {
+func newClient(creator ClientCreator, dc *DialConf, knownTls bool) (Client, error) {
 	c, e := creator.NewClient(dc)
 	if e != nil {
 		return nil, e
@@ -93,11 +128,35 @@ func newclient(creator ClientCreator, dc *DialConf, knownTls bool) (Client, erro
 		c.GetBase().TLS = true
 		e = prepareTLS_forClient(c, dc)
 	}
+	if dc.SendThrough != "" {
+		setSendThroughByNetwork(c.GetBase(), dc.SendThrough)
+	}
 	return c, e
 
 }
 
-//SetAddrStr,  ConfigCommon
+func setSendThroughByNetwork(b *Base, throughStr string) error {
+
+	st, err := netLayer.StrToNetAddr(netLayer.DualNetworkName, throughStr)
+	if err != nil {
+		return utils.ErrInErr{ErrDesc: "parse sendthrough addr failed", ErrDetail: err}
+	}
+
+	switch b.Network() {
+	case netLayer.DualNetworkName:
+
+		b.LTA = st.(*netLayer.TCPUDPAddr).TCPAddr
+		b.LUA = st.(*netLayer.TCPUDPAddr).UDPAddr
+	case "tcp":
+		b.LTA = st.(*net.TCPAddr)
+	case "udp":
+		b.LUA = st.(*net.UDPAddr)
+	}
+
+	return nil
+}
+
+// SetAddrStr,  ConfigCommon
 func configCommonForClient(cli BaseInterface, dc *DialConf) error {
 	if cli.Name() != DirectName {
 		cli.SetAddrStr(dc.GetAddrStrForListenOrDial())
@@ -119,19 +178,19 @@ func NewServer(lc *ListenConf) (Server, error) {
 	protocol := lc.Protocol
 	creator, ok := serverCreatorMap[protocol]
 	if ok {
-		return newserver(creator, lc, false)
+		return newServer(creator, lc, false)
 	} else {
 		realScheme := strings.TrimSuffix(protocol, "s")
 		creator, ok = serverCreatorMap[realScheme]
 		if ok {
-			return newserver(creator, lc, true)
+			return newServer(creator, lc, true)
 		}
 	}
 
-	return nil, utils.ErrInErr{ErrDesc: "unknown server protocol ", Data: protocol}
+	return nil, utils.ErrInErr{ErrDesc: "Unknown server protocol ", Data: protocol}
 }
 
-func newserver(creator ServerCreator, lc *ListenConf, knownTls bool) (Server, error) {
+func newServer(creator ServerCreator, lc *ListenConf, knownTls bool) (Server, error) {
 	ser, err := creator.NewServer(lc)
 	if err != nil {
 		return nil, err
@@ -145,15 +204,16 @@ func newserver(creator ServerCreator, lc *ListenConf, knownTls bool) (Server, er
 		ser.GetBase().TLS = true
 		err = prepareTLS_forServer(ser, lc)
 		if err != nil {
-			return nil, utils.ErrInErr{ErrDesc: "prepareTLS failed", ErrDetail: err}
+			return nil, utils.ErrInErr{ErrDesc: "Failed, prepareTLS", ErrDetail: err}
 
 		}
 	}
+	creator.AfterCommonConfServer(ser)
 	return ser, nil
 
 }
 
-//SetAddrStr, setCantRoute,setFallback, ConfigCommon
+// SetAddrStr, setCantRoute,setFallback, ConfigCommon
 func configCommonForServer(ser BaseInterface, lc *ListenConf) error {
 	ser.SetAddrStr(lc.GetAddrStrForListenOrDial())
 	serc := ser.GetBase()
@@ -169,7 +229,7 @@ func configCommonForServer(ser BaseInterface, lc *ListenConf) error {
 		fa, err := netLayer.NewAddrFromAny(fallbackThing)
 
 		if err != nil {
-			return utils.ErrInErr{ErrDesc: "configCommonURLQueryForServer failed", Data: fallbackThing}
+			return utils.ErrInErr{ErrDesc: "Failed, configCommonURLQueryForServer", Data: fallbackThing}
 
 		}
 

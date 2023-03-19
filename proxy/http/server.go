@@ -1,6 +1,7 @@
-/*Package http implements http proxy for proxy.Server.
+/*
+Package http implements http proxy for proxy.Server.
 
-Reference
+# Reference
 
 rfc: https://datatracker.ietf.org/doc/html/rfc7231#section-4.3.6
 
@@ -8,14 +9,11 @@ about basic auth:
 
 https://en.wikipedia.org/wiki/Basic_access_authentication
 
-
 https://datatracker.ietf.org/doc/html/rfc7617
 
 example header:
 
 	Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==
-
-
 */
 package http
 
@@ -47,21 +45,32 @@ func init() {
 	proxy.RegisterServer(Name, &ServerCreator{})
 }
 
-type ServerCreator struct{}
+type ServerCreator struct{ proxy.CreatorCommonStruct }
 
-func (ServerCreator) NewServerFromURL(u *url.URL) (proxy.Server, error) {
-
-	s := NewServer()
-	var userPass utils.UserPass
-	if userPass.InitWithUrl(u) {
-		s.AddUser(&userPass)
+func (ServerCreator) URLToListenConf(u *url.URL, lc *proxy.ListenConf, format int) (*proxy.ListenConf, error) {
+	if format != proxy.UrlStandardFormat {
+		return lc, utils.ErrUnImplemented
 	}
-	return s, nil
+	if lc == nil {
+		lc = &proxy.ListenConf{}
+	}
+
+	if p, set := u.User.Password(); set {
+
+		user := u.User.Username()
+		pass := p
+		lc.Users = append(lc.Users, utils.UserConf{
+			User: user,
+			Pass: pass,
+		})
+	}
+
+	return lc, nil
 }
 
 func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 	s := NewServer()
-	if str := lc.Uuid; str != "" {
+	if str := lc.UUID; str != "" {
 		var userPass utils.UserPass
 		if userPass.InitWithStr(str) {
 			s.AddUser(&userPass)
@@ -82,13 +91,14 @@ func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 	return s, nil
 }
 
-//implements proxy.Server
+// implements proxy.Server
 type Server struct {
 	proxy.Base
 
 	*utils.MultiUserMap
 
-	OnlyConnect bool //是否仅支持Connect命令; 如果为true, 则直接通过 GET http://xxx 这种请求不再被认为是有效的。之前本以为connect就可以搞定一切，后来实测发现 wget 确实在 非https时 会用 纯http请求的方式 请求代理。所以 一般 OnlyConnect 为 false即可.
+	OnlyConnect bool //是否仅支持Connect命令; 如果为true, 则直接通过 GET http://xxx 这种请求不再被认为是有效的。
+	//之前本以为connect就可以搞定一切，后来实测发现 wget 确实在 非https时 会用 纯http请求的方式 请求代理。所以 一般 OnlyConnect 保持默认 false即可.
 }
 
 func NewServer() *Server {
@@ -109,7 +119,7 @@ func (*Server) Name() string {
 
 func (s *Server) Handshake(underlay net.Conn) (newconn net.Conn, _ netLayer.MsgConn, targetAddr netLayer.Addr, err error) {
 
-	if err = proxy.SetCommonReadTimeout(underlay); err != nil {
+	if err = netLayer.SetCommonReadTimeout(underlay); err != nil {
 		return
 	}
 	defer netLayer.PersistConn(underlay)
@@ -237,7 +247,7 @@ func (s *Server) Handshake(underlay net.Conn) (newconn net.Conn, _ netLayer.MsgC
 	return
 }
 
-//用于纯http的 代理，dial后，第一次要把客户端的数据原封不动发送给远程服务端
+// 用于纯http的 代理，dial后，第一次要把客户端的数据原封不动发送给远程服务端
 // 就是说，第一次从 ProxyConn Read时，读到的一定是之前读过的数据，原理有点像 fallback
 type ProxyConn struct {
 	net.Conn

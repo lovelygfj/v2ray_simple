@@ -7,5 +7,9 @@ import (
 )
 
 func TestNginxResponse(t *testing.T) {
-	t.Log(httpLayer.GetReal400Response())
+	t.Log(httpLayer.GetNginx400Response())
+	if len(httpLayer.Nginx403_html) != 169 {
+		t.Log("len(httpLayer.Nginx403_html)!=169", len(httpLayer.Nginx403_html))
+		t.FailNow()
+	}
 }

@@ -7,6 +7,9 @@ import (
 )
 
 const UUID_BytesLen int = 16
+const ExampleUUID = "a684455c-b14f-11ea-bf0d-42010aaa0003"
+
+type UUID [UUID_BytesLen]byte
 
 func StrToUUID_slice(s string) []byte {
 	bs, err := StrToUUID(s)
@@ -16,7 +19,7 @@ func StrToUUID_slice(s string) []byte {
 	return bs[:]
 }
 
-func StrToUUID(s string) (uuid [UUID_BytesLen]byte, err error) {
+func StrToUUID(s string) (uuid UUID, err error) {
 	if len(s) != 36 {
 		return uuid, ErrInErr{ErrDesc: "invalid UUID Str", ErrDetail: ErrInvalidData, Data: s}
 	}
@@ -45,8 +48,8 @@ func UUIDToStr(u []byte) string {
 	return string(buf)
 }
 
-//生成完全随机的uuid
-func GenerateUUID() (r [UUID_BytesLen]byte) {
+//生成完全随机的uuid,不包含任何uuid版本信息 (即不符合rfc，但是更安全)
+func GenerateUUID() (r UUID) {
 	rand.Reader.Read(r[:])
 	return
 }
@@ -55,10 +58,18 @@ func GenerateUUIDStr() string {
 	return UUIDToStr(bs[:])
 }
 
-//生成符合v4标准的uuid
-func GenerateUUID_v4() (r [UUID_BytesLen]byte) {
+/*
+GenerateUUID_v4 生成符合v4标准的uuid.
+
+ v4: https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
+
+ variant: https://datatracker.ietf.org/doc/html/rfc4122#section-4.1.1
+
+ version: https://datatracker.ietf.org/doc/html/rfc4122#section-4.1.3
+*/
+func GenerateUUID_v4() (r UUID) {
 	rand.Reader.Read(r[:])
 	r[6] = (r[6] & 0x0f) | 0x40 // Version 4
-	r[8] = (r[8] & 0x3f) | 0x80 // Variant is 10，（标准要求 "8", "9", "a", or "b"，我们是第十种）
+	r[8] = (r[8] & 0x3f) | 0x80
 	return
 }

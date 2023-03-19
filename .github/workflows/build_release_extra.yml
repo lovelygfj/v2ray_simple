@@ -8,8 +8,122 @@ on:
         required: true
 
 jobs:
+  gui_ubuntu_arm64:
+    runs-on: ubuntu-18.04
+    env:
+      GOARCH: 'arm64'
+      CGO_ENABLED: 1
+      CC: 'aarch64-linux-gnu-gcc'
 
-  build:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.inputs.tagName }}
+
+      # https://github.com/marketplace/actions/run-on-architecture
+      - uses: uraimo/run-on-arch-action@v2
+        name: Run commands
+        id: runcmd
+        with:
+          arch: aarch64
+          distro: ubuntu18.04
+
+          githubToken: ${{ github.token }}
+
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y build-essential libgtk-3-dev wget
+            wget https://go.dev/dl/go1.19.4.linux-arm64.tar.gz
+            tar -C /usr/local -xzf go1.19.4.linux-arm64.tar.gz
+
+          #run-on-arch-action中，不能使用 GITHUB_PATH; 否则会显示 line 8: GITHUB_PATH: unbound variable
+          run: |
+            export PATH=$PATH:/usr/local/go/bin
+            cd cmd/verysimple/ && make -f Makefile_r_gui.mk PACKNAME=vs_gui_ubuntu_arm64 BUILD_VERSION=${{ github.event.inputs.tagName }} && touch -mt $(date +%Y01010000) *.tar.xz
+
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: cmd/verysimple/*.tar.xz
+          tag: ${{ github.event.inputs.tagName }}
+          file_glob: true
+
+  gui:
+    strategy:
+      matrix:
+        os: [ubuntu-18.04, windows-latest, macos-latest]
+        goarch: [amd64]
+        include:
+          - os: macos-latest
+            goarch: arm64
+      fail-fast: false
+
+    runs-on: ${{ matrix.os }} #因为采用了cgo，所以没办法全在ubuntu上编译
+
+    env:
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.inputs.tagName }}
+
+      - if: ${{ matrix.os  == 'ubuntu-18.04' }}
+        name: install dependency for ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install build-essential libgtk-3-dev
+
+      - if: ${{ matrix.os  != 'windows-latest' }}
+        name: set ASSET_NAME for !windows
+        run: |
+          echo "ASSET_NAME=vs_gui_${{ matrix.os }}_${{ matrix.goarch }}" >> $GITHUB_ENV
+
+      - if: ${{ matrix.os  == 'windows-latest' }}
+        name: set ASSET_NAME for windows
+        run: |
+          echo "ASSET_NAME=vs_gui_${{ matrix.os }}_${{ matrix.goarch }}" | Out-File -FilePath $env:GITHUB_ENV -Append 
+
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.19
+
+      - name: Build
+        run: |
+          cd cmd/verysimple
+          make -f Makefile_r_gui.mk build BUILD_VERSION=${{ github.event.inputs.tagName }}
+
+      - if: ${{ matrix.os  != 'macos-latest' }}
+        name: tar (!macos)
+        run: |
+          cd cmd/verysimple && make -f Makefile_r_gui.mk pack PACKNAME=${{ env.ASSET_NAME }}
+      
+      - if: ${{ matrix.os  == 'macos-latest' }}
+        name: gtar (macos)
+        run: |
+          cd cmd/verysimple && make -f Makefile_r_gui.mk pack_gtar PACKNAME=${{ env.ASSET_NAME }}
+
+      - name: touch xz archive
+        shell: bash
+        run: |
+          cd cmd/verysimple
+          touch -mt $(date +%Y01010000) *.tar.xz
+      
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: cmd/verysimple/*.tar.xz
+          tag: ${{ github.event.inputs.tagName }}
+          file_glob: true
+
+  build_extra:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
@@ -19,11 +133,11 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v2
       with:
-        go-version: 1.18
+        go-version: 1.19
     
     - name: Build
       run: |
-        cd cmd/verysimple/ && make -f Makefile_release extra PACK=1 BUILD_VERSION=${{ github.event.inputs.tagName }}
+        cd cmd/verysimple/ && make -f Makefile_release.mk extra PACK=1 BUILD_VERSION=${{ github.event.inputs.tagName }}
     
     - name: touch xz archive
       shell: bash

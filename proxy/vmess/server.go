@@ -23,36 +23,40 @@ import (
 
 var ErrReplayAttack = errors.New("vmess: we are under replay attack! ")
 
-var ErrReplaySessionAttack = utils.ErrInErr{ErrDesc: "duplicated session id, we are under replay attack! ", ErrDetail: ErrReplayAttack}
+var ErrReplaySessionAttack = utils.ErrInErr{ErrDesc: "vmess: duplicated session id, we are under replay attack! ", ErrDetail: ErrReplayAttack}
 
 func init() {
 	proxy.RegisterServer(Name, &ServerCreator{})
 }
 
-type pair struct {
+type authPair struct {
 	utils.V2rayUser
 	cipher.Block
 }
 
-func authUserByAuthPairList(bs []byte, authPairList []pair, anitReplayMachine *authid_antiReplayMachine) (user utils.V2rayUser, err error) {
+func authUserByAuthPairList(bs []byte, authPairList []authPair, antiReplayMachine *authid_antiReplayMachine) (user utils.V2rayUser, err error) {
 	now := time.Now().Unix()
 
 	var encrypted_authid [authid_len]byte
 	copy(encrypted_authid[:], bs)
 
+	const err_desc = "Vmess AntiReplay Err"
+
 	for _, p := range authPairList {
-		failreason := tryMatchAuthIDByBlock(now, p.Block, encrypted_authid, anitReplayMachine)
+		failreason := tryMatchAuthIDByBlock(now, p.Block, encrypted_authid, antiReplayMachine)
+
 		switch failreason {
 
 		case 0:
 			return p.V2rayUser, nil
-		case 1:
-			err = utils.ErrInvalidData
+		case 1: //crc
+			err = utils.ErrInErr{ErrDesc: err_desc, ErrDetail: utils.ErrInvalidData}
+			//crc校验失败只是证明是随机数据 或者是当前uuid不匹配，需要继续匹配。
 		case 2:
-			err = ErrAuthID_timeBeyondGap
+			err = utils.ErrInErr{ErrDesc: err_desc, ErrDetail: ErrAuthID_timeBeyondGap}
+
 		case 3:
-			err = ErrReplayAttack
-			return
+			err = utils.ErrInErr{ErrDesc: err_desc, ErrDetail: ErrReplayAttack}
 
 		}
 	}
@@ -63,25 +67,28 @@ func authUserByAuthPairList(bs []byte, authPairList []pair, anitReplayMachine *a
 	return
 }
 
-type ServerCreator struct{}
+type ServerCreator struct{ proxy.CreatorCommonStruct }
 
-func (ServerCreator) NewServerFromURL(url *url.URL) (proxy.Server, error) {
+func (ServerCreator) URLToListenConf(url *url.URL, lc *proxy.ListenConf, format int) (*proxy.ListenConf, error) {
 
-	s := NewServer()
+	switch format {
+	case proxy.UrlStandardFormat:
+		if lc == nil {
+			lc = &proxy.ListenConf{}
 
-	if uuidStr := url.User.Username(); uuidStr != "" {
-		v2rayUser, err := utils.NewV2rayUser(uuidStr)
-		if err != nil {
-			return nil, err
+			uuidStr := url.User.Username()
+			lc.UUID = uuidStr
 		}
-		s.addUser(v2rayUser)
+
+		return lc, nil
+	default:
+		return lc, utils.ErrUnImplemented
 	}
 
-	return s, nil
 }
 
 func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
-	uuidStr := lc.Uuid
+	uuidStr := lc.UUID
 
 	s := NewServer()
 
@@ -108,7 +115,7 @@ type Server struct {
 
 	*utils.MultiUserMap
 
-	authPairList []pair
+	authPairList []authPair
 
 	authid_anitReplayMachine  *authid_antiReplayMachine
 	session_antiReplayMachine *session_antiReplayMachine
@@ -136,15 +143,19 @@ func (s *Server) addUser(u utils.V2rayUser) {
 	if err != nil {
 		panic(err)
 	}
-	p := pair{
+	p := authPair{
 		V2rayUser: u,
 		Block:     b,
 	}
 	s.authPairList = append(s.authPairList, p)
 }
 
+func (*Server) HasInnerMux() (int, string) {
+	return 1, "simplesocks"
+}
+
 func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
-	if err := proxy.SetCommonReadTimeout(underlay); err != nil {
+	if err := netLayer.SetCommonReadTimeout(underlay); err != nil {
 		returnErr = err
 		return
 	}
@@ -176,7 +187,7 @@ func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLaye
 		returnErr = errorReason
 
 		if ce := utils.CanLogWarn("vmess openAEADHeader err"); ce != nil {
-			//看v2ray有一个 "drain"的用法，
+			//v2ray代码中有一个 "drain"的用法，
 			//然而，我们这里是不需要drain的，区别在于，v2ray 不是一次性读取一大串数据，
 			// 而是用一个 reader 一点一点读，这就会产生一些可探测的问题，所以才要drain
 			// 而我们直接用 64K 的大buf 一下子读取整个客户端发来的整个数据， 没有读取长度的差别。
@@ -223,8 +234,9 @@ func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLaye
 		return
 	}
 
+	var ismux bool
+
 	switch sc.cmd {
-	//我们 不支持vmess 的 mux.cool
 	case CmdTCP, CmdUDP:
 		ad, err := netLayer.V2rayGetAddrFrom(aeadDataBuf)
 		if err != nil {
@@ -236,7 +248,28 @@ func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLaye
 			ad.Network = "udp"
 		}
 		targetAddr = ad
+
+		//verysimple 不支持v2ray中的 vmess 的 mux.cool
+
+	case cmd_muxcool_unimplemented:
+		returnErr = utils.ErrInErr{ErrDesc: "Vmess mux.cool is not supported by verysimple ", ErrDetail: utils.ErrInvalidData}
+
+	case CMDMux_VS:
+		ismux = true
+
+		_, err := netLayer.V2rayGetAddrFrom(aeadDataBuf)
+		if err != nil {
+			returnErr = utils.NumErr{E: utils.ErrInvalidData, N: 4}
+			return
+		}
+
+	default:
+
+		returnErr = utils.ErrInErr{ErrDesc: "Vmess Invalid command ", ErrDetail: utils.ErrInvalidData, Data: sc.cmd}
+
+		return
 	}
+
 	if paddingLen > 0 {
 		tmpBs := aeadDataBuf.Next(paddingLen)
 		if len(tmpBs) != paddingLen {
@@ -265,6 +298,13 @@ func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLaye
 
 	sc.aead_encodeRespHeader(buf)
 	sc.firstWriteBuf = buf
+
+	if ismux {
+
+		sc.ismux = true
+
+		return sc, nil, targetAddr, nil
+	}
 
 	if sc.cmd == CmdTCP {
 		tcpConn = sc
@@ -297,6 +337,13 @@ type ServerConn struct {
 
 	dataReader io.Reader
 	dataWriter io.Writer
+
+	ismux bool
+}
+
+// 实现 proxy.MuxMarker
+func (s *ServerConn) IsMux() bool {
+	return s.ismux
 }
 
 func (s *ServerConn) aead_encodeRespHeader(outBuf *bytes.Buffer) error {
@@ -344,7 +391,7 @@ func (c *ServerConn) Write(b []byte) (n int, err error) {
 	}
 	switchChan := make(chan struct{})
 
-	//使用 WriteSwitcher 来 粘连 服务器vmess响应 以及第一个数据响应
+	//使用 utils.WriteSwitcher 来 粘连 服务器vmess响应 以及第一个数据响应
 	writer := &utils.WriteSwitcher{
 		Old:        c.firstWriteBuf,
 		New:        c.Conn,
@@ -450,11 +497,17 @@ func (c *ServerConn) Read(b []byte) (n int, err error) {
 		}
 	}
 
+	if c.dataReader == nil {
+		//c.opt == OptBasicFormat (0) 时即出现此情况
+
+		return 0, utils.ErrInErr{ErrDesc: "vmess server might get an old vmess client, closing. (c.dataReader==nil)", Data: c.opt}
+	}
+
 	return c.dataReader.Read(b)
 
 }
 
-func (c *ServerConn) ReadMsgFrom() (bs []byte, target netLayer.Addr, err error) {
+func (c *ServerConn) ReadMsg() (bs []byte, target netLayer.Addr, err error) {
 	bs = utils.GetPacket()
 	var n int
 	n, err = c.Read(bs)
@@ -468,7 +521,7 @@ func (c *ServerConn) ReadMsgFrom() (bs []byte, target netLayer.Addr, err error) 
 	return
 }
 
-func (c *ServerConn) WriteMsgTo(b []byte, _ netLayer.Addr) error {
+func (c *ServerConn) WriteMsg(b []byte, _ netLayer.Addr) error {
 	_, e := c.Write(b)
 	return e
 }

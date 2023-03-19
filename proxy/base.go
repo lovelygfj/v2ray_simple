@@ -3,7 +3,9 @@ package proxy
 import (
 	"crypto/tls"
 	"io"
+	"net"
 	"strings"
+	"sync"
 
 	"github.com/e1732a364fed/v2ray_simple/advLayer"
 	"github.com/e1732a364fed/v2ray_simple/httpLayer"
@@ -14,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-//BaseInterface provides supports for all VSI model layers except proxy layer.
+// BaseInterface provides supports for all VSI model layers except proxy layer.
 type BaseInterface interface {
 	Name() string       //代理协议名称, 如vless
 	MiddleName() string //不包含传输层 和 代理层的 其它VSI层 所使用的协议，前后被加了加号，如 +tls+ws+
@@ -79,7 +81,8 @@ type BaseInterface interface {
 // 规定，所有的proxy都要内嵌本struct. 我们用这种方式实现 "继承".
 // 这是verysimple的架构所要求的。
 // verysimple规定，在加载完配置文件后，listen/dial 所使用的全部层级都是完整确定了的.
-//  因为所有使用的层级都是确定的，就可以进行针对性优化
+//
+//	因为所有使用的层级都是确定的，就可以进行针对性优化
 type Base struct {
 	ListenConf *ListenConf
 	DialConf   *DialConf
@@ -94,8 +97,9 @@ type Base struct {
 
 	IsFullcone bool
 
-	Tls_s *tlsLayer.Server
-	Tls_c *tlsLayer.Client
+	Tls_s   *tlsLayer.Server
+	Tls_c   *tlsLayer.Client
+	TlsConf tlsLayer.Conf
 
 	Header *httpLayer.HeaderPreset
 
@@ -110,10 +114,22 @@ type Base struct {
 
 	Innermux *smux.Session //用于存储 client的已拨号的mux连接
 
+	sync.Mutex
+
+	//用于sendthrough
+	LTA *net.TCPAddr
+	LUA *net.UDPAddr
 }
 
 func (b *Base) GetBase() *Base {
 	return b
+}
+
+func (b *Base) LocalTCPAddr() *net.TCPAddr {
+	return b.LTA
+}
+func (b *Base) LocalUDPAddr() *net.UDPAddr {
+	return (b.LUA)
 }
 
 func (b *Base) Network() string {
@@ -137,19 +153,30 @@ func (b *Base) MiddleName() string {
 	sb.WriteString("")
 
 	if b.TLS {
-		sb.WriteString("+tls")
+		tt := "tls"
+		if dc := b.DialConf; dc != nil && dc.TlsType != "" {
+			tt = dc.TlsType
+		}
+
+		if lc := b.ListenConf; lc != nil && lc.TlsType != "" {
+			tt = lc.TlsType
+		}
+
+		sb.WriteString("+")
+		sb.WriteString(tt)
 		if b.IsLazyTls() {
 			sb.WriteString("+lazy")
 		}
 	}
+	advL := b.AdvancedL
 	if b.Header != nil {
-		if b.AdvancedL != "ws" {
+		if advL != "ws" && advL != "grpc" {
 			sb.WriteString("+http")
 		}
 	}
-	if b.AdvancedL != "" {
+	if advL != "" {
 		sb.WriteString("+")
-		sb.WriteString(b.AdvancedL)
+		sb.WriteString(advL)
 	}
 	sb.WriteString("+")
 	return sb.String()
@@ -171,10 +198,11 @@ func (b *Base) Sniffing() bool {
 }
 
 func (b *Base) InnerMuxEstablished() bool {
+
 	return b.Innermux != nil && !b.Innermux.IsClosed()
 }
 
-//placeholder
+// placeholder
 func (b *Base) HasInnerMux() (int, string) {
 	return 0, ""
 }
@@ -194,14 +222,14 @@ func (*Base) GetServerInnerMuxSession(wlc io.ReadWriteCloser) *smux.Session {
 }
 
 func (b *Base) CloseInnerMuxSession() {
-	if b.Innermux != nil && !b.Innermux.IsClosed() {
+	if b.InnerMuxEstablished() {
 		b.Innermux.Close()
 		b.Innermux = nil
 	}
 }
 
 func (b *Base) GetClientInnerMuxSession(wrc io.ReadWriteCloser) *smux.Session {
-	if b.Innermux != nil && !b.Innermux.IsClosed() {
+	if b.InnerMuxEstablished() {
 		return b.Innermux
 	} else {
 		smuxConfig := smux.DefaultConfig()
@@ -219,7 +247,7 @@ func (b *Base) GetClientInnerMuxSession(wrc io.ReadWriteCloser) *smux.Session {
 	}
 }
 
-//return false. As a placeholder.
+// return false. As a placeholder.
 func (b *Base) IsUDP_MultiChannel() bool {
 	return false
 }
@@ -232,20 +260,16 @@ func (b *Base) GetSockopt() *netLayer.Sockopt {
 }
 
 func (b *Base) setNetwork(network string) {
-	if network == "" {
-		b.TransportLayer = "tcp"
 
-	} else {
-		b.TransportLayer = network
+	b.TransportLayer = network
 
-	}
 }
 
 func (b *Base) AdvancedLayer() string {
 	return b.AdvancedL
 }
 
-//try close inner mux and stop AdvS
+// try close inner mux and stop AdvS
 func (b *Base) Stop() {
 	if b.Innermux != nil {
 		b.Innermux.Close()
@@ -256,7 +280,7 @@ func (b *Base) Stop() {
 	}
 }
 
-//return false. As a placeholder.
+// return false. As a placeholder.
 func (b *Base) CanFallback() bool {
 	return false
 }
@@ -297,7 +321,7 @@ func (b *Base) GetAdvServer() advLayer.Server {
 	return b.AdvS
 }
 
-//setNetwork, Xver, Tag,Sockopt, IsFullcone, Header,AdvancedL, InitAdvLayer
+// setNetwork, Xver, Tag,Sockopt, IsFullcone, Header,AdvancedL, InitAdvLayer
 func (b *Base) ConfigCommon(cc *CommonConf) {
 
 	b.setNetwork(cc.Network)
@@ -316,7 +340,7 @@ func (b *Base) ConfigCommon(cc *CommonConf) {
 	b.InitAdvLayer()
 }
 
-//高级层就像代理层一样重要，可以注册多种包，配置选项也比较多。
+// 高级层就像代理层一样重要，可以注册多种包，配置选项也比较多。
 func (b *Base) InitAdvLayer() {
 	switch b.AdvancedL {
 	case "":
@@ -362,9 +386,16 @@ func (b *Base) InitAdvLayer() {
 					KeyFile:  dc.TLSKey,
 				}
 			}
-			minVer := tlsLayer.GetMinVerFromExtra(dc.Extra)
 
-			tConf = tlsLayer.GetTlsConfig(dc.Insecure, false, dc.Alpn, dc.Host, certConf, minVer)
+			tConf = tlsLayer.GetTlsConfig(false, tlsLayer.Conf{
+				Insecure:     dc.Insecure,
+				AlpnList:     dc.Alpn,
+				Host:         dc.Host,
+				CertConf:     certConf,
+				Minver:       getTlsMinVerFromExtra(dc.Extra),
+				Maxver:       getTlsMaxVerFromExtra(dc.Extra),
+				CipherSuites: getTlsCipherSuitesFromExtra(dc.Extra),
+			})
 
 		}
 
@@ -382,7 +413,7 @@ func (b *Base) InitAdvLayer() {
 		advClient, err := creator.NewClientFromConf(aConf)
 		if err != nil {
 
-			if ce := utils.CanLogErr("InitAdvLayer client failed "); ce != nil {
+			if ce := utils.CanLogErr("Failed in InitAdvLayer client"); ce != nil {
 				ce.Write(
 					zap.String("protocol", b.AdvancedL),
 					zap.Error(err),
@@ -415,17 +446,23 @@ func (b *Base) InitAdvLayer() {
 
 		if creator.IsSuper() {
 
-			minVer := tlsLayer.GetMinVerFromExtra(lc.Extra)
-
-			aConf.TlsConf = tlsLayer.GetTlsConfig(lc.Insecure, true, lc.Alpn, lc.Host, &tlsLayer.CertConf{
-				CertFile: lc.TLSCert, KeyFile: lc.TLSKey, CA: lc.CA,
-			}, minVer)
+			aConf.TlsConf = tlsLayer.GetTlsConfig(true, tlsLayer.Conf{
+				Insecure: lc.Insecure,
+				AlpnList: lc.Alpn,
+				Host:     lc.Host,
+				CertConf: &tlsLayer.CertConf{
+					CertFile: lc.TLSCert, KeyFile: lc.TLSKey, CA: lc.CA,
+				},
+				Minver:       getTlsMinVerFromExtra(lc.Extra),
+				Maxver:       getTlsMaxVerFromExtra(lc.Extra),
+				CipherSuites: getTlsCipherSuitesFromExtra(lc.Extra),
+			})
 		}
 
 		advSer, err := creator.NewServerFromConf(aConf)
 		if err != nil {
 
-			if ce := utils.CanLogErr("InitAdvLayer server failed "); ce != nil {
+			if ce := utils.CanLogErr("Failed in InitAdvLayer server"); ce != nil {
 				ce.Write(
 					zap.String("protocol", b.AdvancedL),
 					zap.Error(err),
@@ -437,4 +474,35 @@ func (b *Base) InitAdvLayer() {
 
 		b.AdvS = advSer
 	}
+}
+
+func (d *Base) DialTCP(target netLayer.Addr) (result net.Conn, err error) {
+	if d.Sockopt != nil {
+		if d.LTA == nil {
+			result, err = target.DialWithOpt(d.Sockopt, nil) //避免把nil的 *net.TCPAddr 装箱到 net.Addr里
+
+		} else {
+			result, err = target.DialWithOpt(d.Sockopt, d.LTA)
+
+		}
+	} else {
+		if d.LTA == nil {
+			result, err = target.Dial(nil, nil)
+
+		} else {
+			result, err = target.Dial(nil, d.LTA)
+
+		}
+	}
+	return
+}
+
+func (d *Base) DialUDP(target netLayer.Addr) (mc *netLayer.UDPMsgConn, err error) {
+
+	mc, err = netLayer.NewUDPMsgConn(d.LUA, d.IsFullcone, false, d.Sockopt)
+	return
+
+}
+func (d *Base) SelfListen() (is bool, tcp, udp int) {
+	return
 }

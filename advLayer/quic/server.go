@@ -13,8 +13,48 @@ import (
 	"go.uber.org/zap"
 )
 
-//non-blocking
-func ListenInitialLayers(addr string, tlsConf tls.Config, arg arguments) (newConnChan chan net.Conn, returnCloser io.Closer) {
+// implements advLayer.SuperMuxServer
+type Server struct {
+	Creator
+
+	addr    string
+	tlsConf tls.Config
+	args    arguments
+
+	listener io.Closer
+}
+
+// quic 没path配置；return ""
+func (s *Server) GetPath() string {
+	return ""
+}
+
+func (s *Server) Stop() {
+	if s.listener != nil {
+		l := s.listener
+		s.listener = nil
+
+		l.Close()
+	}
+}
+
+func (s *Server) StartListen(newSubConnFunc func(net.Conn)) (baseConn io.Closer) {
+
+	baseConn = ListenInitialLayers(s.addr, s.tlsConf, s.args, newSubConnFunc)
+	if baseConn != nil {
+		s.listener = baseConn
+
+	}
+	return
+}
+
+// 阻塞，不支持回落。
+func (s *Server) StartHandle(underlay net.Conn, newSubConnFunc func(net.Conn), _ func(httpLayer.FallbackMeta)) {
+	dealNewConn(underlay.(quic.Connection), newSubConnFunc)
+}
+
+// non-blocking
+func ListenInitialLayers(addr string, tlsConf tls.Config, arg arguments, newSubConnFunc func(net.Conn)) (returnCloser io.Closer) {
 
 	thisConfig := common_ListenConfig
 	if arg.customMaxStreamsInOneConn > 0 {
@@ -29,14 +69,14 @@ func ListenInitialLayers(addr string, tlsConf tls.Config, arg arguments) (newCon
 
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		if ce := utils.CanLogErr("QUIC ResolveUDPAddr failed"); ce != nil {
+		if ce := utils.CanLogErr("Failed in QUIC ResolveUDPAddr"); ce != nil {
 			ce.Write(zap.Error(err))
 		}
 		return
 	}
 	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		if ce := utils.CanLogErr("QUIC listen udp failed"); ce != nil {
+		if ce := utils.CanLogErr("Failed in QUIC listen udp"); ce != nil {
 			ce.Write(zap.Error(err))
 		}
 		return
@@ -52,7 +92,7 @@ func ListenInitialLayers(addr string, tlsConf tls.Config, arg arguments) (newCon
 
 	}
 	if err != nil {
-		if ce := utils.CanLogErr("QUIC listen failed"); ce != nil {
+		if ce := utils.CanLogErr("Failed in QUIC listen"); ce != nil {
 			ce.Write(zap.Error(err))
 		}
 		return
@@ -64,13 +104,11 @@ func ListenInitialLayers(addr string, tlsConf tls.Config, arg arguments) (newCon
 		}
 	}
 
-	newConnChan = make(chan net.Conn, 10)
-
 	if arg.early {
-		go loopAcceptEarly(elistener, newConnChan, arg.useHysteria, arg.hysteria_manual, arg.hysteriaMaxByteCount)
+		go loopAcceptEarly(elistener, newSubConnFunc, arg.useHysteria, arg.hysteria_manual, arg.hysteriaMaxByteCount)
 		returnCloser = elistener
 	} else {
-		go loopAccept(listener, newConnChan, arg.useHysteria, arg.hysteria_manual, arg.hysteriaMaxByteCount)
+		go loopAccept(listener, newSubConnFunc, arg.useHysteria, arg.hysteria_manual, arg.hysteriaMaxByteCount)
 
 		returnCloser = listener
 	}
@@ -78,13 +116,13 @@ func ListenInitialLayers(addr string, tlsConf tls.Config, arg arguments) (newCon
 	return
 }
 
-//阻塞
-func loopAccept(l quic.Listener, theChan chan net.Conn, useHysteria bool, hysteria_manual bool, hysteriaMaxByteCount int) {
+// 阻塞
+func loopAccept(l quic.Listener, newSubConnFunc func(net.Conn), useHysteria bool, hysteria_manual bool, hysteriaMaxByteCount int) {
 	for {
 
 		conn, err := l.Accept(context.Background())
 		if err != nil {
-			if ce := utils.CanLogErr("QUIC accept failed"); ce != nil {
+			if ce := utils.CanLogErr("Failed in QUIC accept"); ce != nil {
 				ce.Write(zap.Error(err))
 			}
 			//close(theChan)	//不应关闭chan，因为listen虽然不好使但是也许现存的stream还是好使的...
@@ -95,19 +133,19 @@ func loopAccept(l quic.Listener, theChan chan net.Conn, useHysteria bool, hyster
 			configHyForConn(conn, hysteria_manual, hysteriaMaxByteCount)
 		}
 
-		go dealNewConn(conn, theChan)
+		go dealNewConn(conn, newSubConnFunc)
 
 	}
 }
 
-//阻塞
-func loopAcceptEarly(el quic.EarlyListener, theChan chan net.Conn, useHysteria bool, hysteria_manual bool, hysteriaMaxByteCount int) {
+// 阻塞
+func loopAcceptEarly(el quic.EarlyListener, newSubConnFunc func(net.Conn), useHysteria bool, hysteria_manual bool, hysteriaMaxByteCount int) {
 
 	for {
 
 		conn, err := el.Accept(context.Background())
 		if err != nil {
-			if ce := utils.CanLogErr("QUIC early accept failed"); ce != nil {
+			if ce := utils.CanLogErr("Failed in QUIC early accept"); ce != nil {
 				ce.Write(zap.Error(err))
 			}
 			return
@@ -117,7 +155,7 @@ func loopAcceptEarly(el quic.EarlyListener, theChan chan net.Conn, useHysteria b
 			configHyForConn(conn, hysteria_manual, hysteriaMaxByteCount)
 		}
 
-		go dealNewConn(conn, theChan)
+		go dealNewConn(conn, newSubConnFunc)
 
 	}
 }
@@ -134,13 +172,13 @@ func configHyForConn(conn quic.Connection, hysteria_manual bool, hysteriaMaxByte
 	}
 }
 
-//阻塞
-func dealNewConn(conn quic.Connection, theChan chan net.Conn) {
+// 阻塞
+func dealNewConn(conn quic.Connection, newSubConnFunc func(net.Conn)) {
 
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
-			if ce := utils.CanLogDebug("QUIC stream accept failed"); ce != nil {
+			if ce := utils.CanLogDebug("Failed in QUIC stream accept"); ce != nil {
 				//只要某个连接idle时间一长，超过了idleTimeout，服务端就会出现此错误:
 				// timeout: no recent network activity，即 quic.IdleTimeoutError
 				//这不能说是错误, 而是quic的udp特性所致，所以放到debug 输出中.
@@ -153,45 +191,7 @@ func dealNewConn(conn quic.Connection, theChan chan net.Conn) {
 			}
 			break
 		}
-		theChan <- &StreamConn{stream, conn.LocalAddr(), conn.RemoteAddr(), nil, false}
+		// theChan <- &StreamConn{stream, conn.LocalAddr(), conn.RemoteAddr(), nil, false}
+		go newSubConnFunc(&StreamConn{stream, conn.LocalAddr(), conn.RemoteAddr(), nil, false})
 	}
-}
-
-//implements advLayer.SuperMuxServer
-type Server struct {
-	Creator
-
-	addr    string
-	tlsConf tls.Config
-	args    arguments
-
-	listener io.Closer
-}
-
-func (s *Server) GetPath() string {
-	return ""
-}
-
-func (s *Server) Stop() {
-
-	if s.listener != nil {
-		s.listener.Close()
-
-	}
-
-}
-
-func (s *Server) StartListen() (newSubConnChan chan net.Conn, baseConn io.Closer) {
-
-	newSubConnChan, baseConn = ListenInitialLayers(s.addr, s.tlsConf, s.args)
-	if baseConn != nil {
-		s.listener = baseConn
-
-	}
-	return
-}
-
-//非阻塞，不支持回落。
-func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fallbackConnChan chan httpLayer.FallbackMeta) {
-	go dealNewConn(underlay.(quic.Connection), newSubConnChan)
 }

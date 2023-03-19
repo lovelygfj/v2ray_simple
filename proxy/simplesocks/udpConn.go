@@ -17,6 +17,8 @@ type UDPConn struct {
 	bufr         *bufio.Reader
 	handshakeBuf *bytes.Buffer
 	fullcone     bool
+
+	upstreamUser utils.User
 }
 
 func NewUDPConn(conn net.Conn, optionalReader io.Reader) (uc *UDPConn) {
@@ -31,19 +33,49 @@ func NewUDPConn(conn net.Conn, optionalReader io.Reader) (uc *UDPConn) {
 	return
 }
 
+func (c *UDPConn) SetUser(u utils.User) {
+	c.upstreamUser = u
+}
+
+func (c *UDPConn) IdentityStr() string {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.IdentityStr()
+	}
+	return ""
+}
+
+func (c *UDPConn) IdentityBytes() []byte {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.IdentityBytes()
+	}
+	return nil
+}
+
+func (c *UDPConn) AuthStr() string {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.AuthStr()
+	}
+	return ""
+}
+func (c *UDPConn) AuthBytes() []byte {
+	if c.upstreamUser != nil {
+		return c.upstreamUser.AuthBytes()
+	}
+	return nil
+}
+
 func (u *UDPConn) Fullcone() bool {
 	return u.fullcone
 }
 func (u *UDPConn) CloseConnWithRaddr(raddr netLayer.Addr) error {
 	return u.Close()
 }
-func (u *UDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
+func (u *UDPConn) ReadMsg() ([]byte, netLayer.Addr, error) {
 
 	//simplesocks 文档里并没有提及udp如何传输，而在trojan-go的代码里, 发现simplesocks完全使用trojan的udp格式。
 	// https://github.com/p4gefau1t/trojan-go/blob/2dc60f52e79ff8b910e78e444f1e80678e936450/tunnel/simplesocks/conn.go#L41
 	// https://github.com/p4gefau1t/trojan-go/blob/2dc60f52e79ff8b910e78e444f1e80678e936450/tunnel/trojan/packet.go#L34
 	//可以看到和trojan协议一样，长度后面要跟随 crlf
-	//主要是本以为simplesocks能更加simple的，去掉crlf，结果还是差强人意。。。
 
 	addr, err := GetAddrFrom(u.bufr)
 	if err != nil {
@@ -89,7 +121,7 @@ func (u *UDPConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
 	return bs[:n], addr, nil
 }
 
-func (u *UDPConn) WriteMsgTo(bs []byte, addr netLayer.Addr) error {
+func (u *UDPConn) WriteMsg(bs []byte, addr netLayer.Addr) error {
 
 	var buf *bytes.Buffer
 	if u.handshakeBuf != nil {
@@ -101,7 +133,7 @@ func (u *UDPConn) WriteMsgTo(bs []byte, addr netLayer.Addr) error {
 	abs, atype := addr.AddressBytes()
 
 	atype = netLayer.ATypeToSocks5Standard(atype)
-	buf.WriteByte(atype)
+	buf.WriteByte(netLayer.ATypeToSocks5Standard(atype))
 	buf.Write(abs)
 
 	buf.WriteByte(byte(addr.Port >> 8))

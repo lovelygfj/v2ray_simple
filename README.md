@@ -11,36 +11,43 @@
 [9]: https://img.shields.io/github/release/e1732a364fed/v2ray_simple/all.svg?style=flat-square
 [10]: https://img.shields.io/github/go-mod/go-version/e1732a364fed/v2ray_simple?style=flat-square
 
+## 最新消息
+
+vsb项目已经支持了安卓vpn功能: 
+https://github.com/e1732a364fed/vsb/releases
 
 # verysimple
 
 verysimple， 实际上 谐音来自 V2ray Simple (显然只适用于汉语母语者), 意思就是极简.
 
-verysimple 是一个 代理内核, 对标 v2ray/xray，功能较为丰富。
+只有项目名称是v2ray_simple，其它所有场合 全使用 verysimple 这个名称，可简称 "vs".
 
-本作的想法是，使用自己的代码，实现v2ray的所有的好的功能（并摒弃差的功能），而且使用自主研发的更简单的架构，结合自主研发的新技术，实现反超。
+verysimple 是一个 代理内核, 对标 v2ray/xray，功能较为丰富，轻量级，极简，用户友好，新手向。
 
-verysimple项目大大简化了 转发机制，能提高运行速度。本项目 转发流量时，关键代码直接放在main.go里！非常直白易懂。
+verysimple 的基本优势是，文件小，占用内存小，速度快，配置文件格式简单容易写。对比v2ray的嵌套json式配置格式，我们的vs的配置格式完全是扁平化的, 没有那么多大括号
 
-只有项目名称是v2ray_simple，其它所有场合 全使用 verysimple 这个名称，可简称 "vs"。本作过于极简，极简得连logo也没有.
+vs简化了转发机制，能提高运行速度。且有用户报告内存占用 比v2ray/xray 小1/3。
 
-规定，编译出的文件名必须以 verysimple 开头.
+vs的一些亮点是 全协议readv加速，lazy技术，vless v1，hysteria 阻控，更广泛的utls支持，grpc回落，交互模式等。
 
-verysimple 研发了一些新技术，使用自研架构，可以加速，目前基本上是全网最快，且有用户报告内存占用 比v2ray/xray 小1/3。
+本作以学习编程技术为主要目标，使用自己的代码，实现v2ray的所有的好的功能，摒弃差的或者太复杂看不懂或者小白用不到的功能，使用自主研发的更简单的架构，结合自主研发的新技术，实现反超。
 
-vs的一些亮点是 全协议readv加速，lazy技术，vless v1，hysteria 阻控，更广泛等utls支持，grpc回落，交互模式等。
+vs既不是v2ray/xray的超集，也不是子集，属于并列的内核, 有交集. 因为vs用自己的架构, 并不直接来源于v2ray. 有点类似 unix 和linux的关系。
 
-支持的功能有:
 
-socks5(包括 udp associate 以及用户密码)/http(以及用户密码)/socks5http(与clash的mixed等价)/dokodemo/tproxy(透明代理)/trojan/simplesocks/vless(v0/v1)/vmess, 多用户,
+## 支持的功能
 
-ws(以及earlydata)/grpc(以及multiMode,uTls，以及 支持回落的 grpcSimple)/quic(以及hy阻控、手动挡 和 0-rtt)/smux, 
+[win/mac/linux的sockopt.device(bindToDevice)]/tcp/udp(以及fullcone)/unix domain socket, PROXY protocol v1/v2 监听, splice/readv
+
+tls(包括生成随机证书;客户端证书验证;rejectUnknownSni), uTls, shadowTls(v1/v2) ,**【tls lazy encrypt】**, 
+
+http伪装头(**可支持回落**)/ws(以及earlydata)/grpc(以及multiMode,uTls，以及 **支持回落的 grpcSimple**)/quic(以及**hy阻控、手动挡** 和 0-rtt)/smux, 
+
+socks5(包括 udp associate 以及用户密码)/http(以及用户密码)/socks5http(与clash的mixed等价)/dokodemo/tproxy/tun/trojan/simplesocks/vless(v0/**v1**)/vmess/shadowsocks, 多用户, http头
 
 dns(udp/tls)/route(geoip/geosite,分流功能完全与v2ray等价)/fallback(path/sni/alpn/PROXY protocol v1/v2), sniffing(tls)
 
-tcp/udp(以及fullcone)/unix domain socket, tls(包括客户端证书验证), uTls,【tls lazy encrypt】, http伪装头,PROXY protocol v1/v2 监听,
-
-cli(交互模式)/apiServer, Docker, docker-compose.
+cli(**交互模式**)/**gui/[vsb计划](https://github.com/e1732a364fed/vsb)(flutter写的面板)**/apiServer, Docker, docker-compose.
 
 
 为了不吓跑小白，本 README 把安装、使用方式 放在了前面，如果你要直接阅读本作的技术介绍部分，点击跳转 -> [创新点](#创新点)
@@ -49,28 +56,22 @@ cli(交互模式)/apiServer, Docker, docker-compose.
 
 ## 安装方式：
 
-对觉得本作安装很复杂的人，我再强调一遍: 
-
-本作对标的是 v2ray和xray等内核，不是对标的“安装脚本”，**本作是个内核**，再说一遍。内核能支持各种交互模式已经很强大了好不好。
-
-你见哪个内核项目负责人自己上来就提供完整一键脚本的？都是其他人帮着提供的，我这么忙哪有时间研究一键脚本。有需求的你可以写一个然后提PR啊。
-
-本内核完全是我自己写的，完全不同于 xray这种 fork的版本，所以我很忙的。
-
 ### 下载安装
 
-如果是 linux服务器，可以参考我的一篇指导文章 [install.md](docs/install.md)
+如果是 linux服务器，可参考指导文章 [install.md](docs/install.md).
 
-电脑客户端的话直接自己到release下载就行。
+电脑客户端的话直接自己到 [release](https://github.com/e1732a364fed/v2ray_simple/releases)下载就行。
+
+本作自v1.2.5开始，还发布 vs_gui系列, 包含gui, tun 等支持，用于电脑客户端。 
 
 #### 客户端的 geoip和 geosite
 
 注意如果要geoip分流，而且要自己的mmdb文件的话（高玩情况），还要下载mmdb；
 
 
-默认第一次运行是会自动下载mmdb文件的，所以不用太担心。
+默认 如果加上 -d 参数的话，是会自动下载mmdb文件以及 geosite 文件夹的，而且如果你指定了配置文件并且你的节点可用，则还会 自动通过 你的节点 下载 这两个文件，所以不怕被 封锁。
 
-不过geosite的话，也是需要下载的，可以通过交互模式进行下载，或通过如下命令下载
+如果不用 -d 参数，可以通过交互模式进行下载，或通过如下命令下载
 
 ```sh
 #在verysimple可执行文件所在目录
@@ -80,9 +81,7 @@ mv domain-list-community geosite
 
 通过git下载的好处是, 自己想要更新时，直接 `git pull` 即可;
 
-通过 交互模式进行下载的好处是, 如果你配置了配置文件, 并且有一个可用的节点, 则交互模式优先通过你的节点来下载geosite.
-
-这样可以避免github被墙的情况。
+通过 交互模式 或者 -d 参数进行下载的好处是, 如果你配置了配置文件, 并且有一个可用的节点, 则优先通过你的节点来下载geosite.
 
 
 ### 编译安装
@@ -98,58 +97,29 @@ cd v2ray_simple/cmd/verysimple && go build
 
 注意，本项目自v1.1.9开始，可执行文件的目录在 cmd/verysimple 文件夹内，而根目录 为 v2ray_simple 包。
 
+以前vs的尺寸是很小的，不过随着功能增加，尺寸也大了起来，目前最占用空间的是tun功能, 如果你编译使用 notun 这个tag, 则可以减小 3.5MB大小. 其次是quic功能，取消之也可以减小尺寸
+
 ## 运行方式
 
 本作支持多种运行模式，方便不同需求的同学使用
 
-1. 命令行模式
-2. 极简模式
-3. 标准模式
-4. 兼容模式
-5. 交互模式
+1. 命令行模式 (也称 URL模式)
+2. 标准模式 (也称 toml模式)
+3. 兼容模式
+4. 交互模式
+5. GUI 模式
 
+本项目自 v1.2.5开始，移除了 json格式的"极简模式".
 
 ### 运行前的准备
 
-若为客户端，运行 `./verysimple -i` 进入交互模式，选择下载geosite文件
-
-第一次运行时会自动下载geoip文件。
-
+若为客户端，可运行 `./verysimple -i` 进入交互模式，选择下载geosite文件夹 以及 geoip文件(GeoLite2-Country.mmdb)
 
 可以通过 [交互模式](#交互模式) 来生成自定义的配置。
 
-### 极简模式
+### 命令行模式 (也称 URL模式)
 
-```sh
-#客户端, 极简模式
-verysimple -c client.json
-
-#服务端, 极简模式
-verysimple -c server.json
-```
-
-关于 vlesss 的配置，查看 vs.server.json和 vs.client.json 就知道了，很简单的。
-
-目前极简模式配置文件最短情况一共就4行，其中两行还是花括号，这要是还要我解释我就踢你的屁股。
-
-极简模式使用json格式，内部使用链接url的方式，所以非常节省空间;
-
-极简模式 不支持 复杂分流，dns 等高级特性。极简模式只支持通过 mycountry进行 geoip分流 这一种分流情况。
-
-极简模式暂不支持 ws/grpc 特性.
-
-极简模式继承自v2simple，理念是字越少越好。推荐没有极简需求的同学直接使用标准模式。
-
-verysimple 继承 v2simple的一个优点，就是服务端的配置也可以用url做到。谁规定url只能用于分享客户端配置了？一条url肯定比json更容易配置，不容易出错。
-
-
-另外，极简模式所使用的 url并不是正规的 各个协议所规定的 分享链接格式，而是我们自己的格式，所以链接看起来会略有区别。
-
-以后可以考虑 推出一个 选项，选择 到底是 使用协议所规定的格式, 还是 使用我们verysimple自己的通用链接格式。
-
-### 命令行模式
-
-如果学会了极简模式里的url配置后，还可以用如下命令来运行，无需配置文件
+可以用如下命令来运行，无需配置文件. -D如果不指定，默认为direct
 
 ```sh
 #客户端
@@ -161,9 +131,15 @@ verysimple -L=vlesss://你的uuid@你的服务器ip:443?cert=cert.pem&key=cert.k
 
 不细心的人要注意了，vlesss，要三个s，不然的话你就是裸奔状态,加了第三个s才表示套tls
 
-命令行模式 实际上就是把命令行的内容转化成极简模式的配置 然后再处理
-
 命令行模式 不支持dns、分流、复杂回落 等特性。只能在url中配置 默认回落。
+
+关于url格式的具体写法，见： [url标准定义](docs/url.md)，vs定义了一种通用url格式。
+
+命令行模式继承自 v2simple, 理念是字越少越好。
+
+不过推荐没有极简需求的同学直接使用标准模式。
+
+另外，verysimple 继承 v2simple的一个优点，就是服务端的配置也可以用url做到。谁规定url只能用于分享客户端配置了？一条url肯定比json更容易配置，不容易出错。
 
 ### 标准模式
 
@@ -177,44 +153,60 @@ verysimple -c server.toml
 
 标准模式使用toml格式，类似windows的ini，对新手友好，不容易写错。推荐直接使用标准模式。
 
-**本作的 examples文件夹中的 vlesss.client.toml, vlesss.server.toml , multi.client.toml 等文件中 提供了大量解释性的注释, 对新手很友好, 一定要读一下，才可以熟练掌握配置格式。**
+**examples文件夹中的 vlesss.client.toml, vlesss.server.toml , multi.client.toml 等文件中 提供了大量解释性的注释, 对新手很友好, 一定要读一下，才可以熟练掌握配置格式。**
+
+我们大部分的toml示例文件都有一定的教学意义，希望用户能都读一下。
 
 ### 兼容模式
 
-未来会推出兼容v2ray的json配置文件的模式。
+未来会推出兼容v2ray的json配置文件的模式。目前打算仅支持v5格式，但是目前观察似乎v2ray社区的v5文档写的比较不完整，所以慢慢来。
 
 ### 交互模式
 
-已经推出了交互模式, 可以在命令行交互着生成一个你想要的配置，这样也就不需要各种一键脚本了
+交互模式可以在命令行交互着生成一个你想要的配置，这样也就不需要各种一键脚本了
 
-交互模式有很多好玩的功能，可以试试。
+交互模式有很多好玩的功能，可以试试，使用起来很灵活。
 
-运行 `verysimple -i` 即可进入交互模式
+运行 `verysimple -i` 即可进入交互模式; 你也可以在-c指定了配置文件的同时 指定-i，这样就可以边运行边动态调整了。
 
 目前支持如下功能：
 
 1. 生成随机ssl证书
-2. 交互生成配置，超级强大
-3. 热删除配置
-4. 热加载新配置文件
-5. 调节日志等级
-6. 调节hy手动挡
-7. 生成一个随机的uuid供你参考
-8. 下载geosite文件夹
-9. 下载geoip文件(GeoLite2-Country.mmdb)
-10. 打印当前版本所支持的所有协议
-11. 查询当前状态
-12. 为tproxy设置iptables(12345端口)
-13. 为tproxy移除iptables
+2. 【交互生成配置】，超级强大
+3. 【生成分享链接】<-当前的配置
+4. 热删除配置
+5. 【热加载】新配置文件
+6. 【热加载】新配置url
+7. 调节日志等级
+8. 调节hy手动挡
+9. 生成一个随机的uuid供你参考
+10. 下载geosite文件夹
+11. 下载geoip文件(GeoLite2-Country.mmdb)
+12. 打印当前版本所支持的所有协议
+13. 查询当前状态
+14. 为tproxy设置iptables(12345端口)
+15. 为tproxy移除iptables
 
 
 交互生成配置后还可以输出到文件、加载到当前运行环境、生成分享链接。
+
+### GUI 模式
+
+运行 vs_gui 开头的发布包中的 verysimple
+
+下面是在macOS运行的效果
+
+![](docs/pics/vsgui_baseControl_cb02d3b7.png)
+
+![](docs/pics/vsgui_appControl_cb02d3b7.png)
 
 ### 其他说明
 
 如果你不是放在path里的，则要 `./verysimple`, 前面要加一个点和一个斜杠。windows没这个要求。
 
 ## 关于证书
+
+<details>
 
 自己生成证书！而且最好是用 自己真实拥有的域名，使用acme.sh等脚本申请免费证书，特别是建站等情况。
 
@@ -259,6 +251,20 @@ openssl x509 -req -days 365 -sha256  -in client.csr -CA ca.crt -CAkey ca.key -se
 
 在你的服务端下载好程序后，运行 `verysimple -i` 开启交互模式，然后按向下箭头 找到对应选项，按回车 来自动生成tls证书。
 
+</details>
+
+
+# 技术相关
+
+<details>
+
+<summary>技术相关</summary>
+
+verysimple项目。本项目 转发流量时，关键代码直接放在main.go里！非常直白易懂。
+
+总的来说，代理的编写是一个非常简单的事情，属于平民级别。
+只要不涉及复杂的tls、tcp、ip原始协议的解析，不涉及新代理协议的制定，只是制作一款代理是相当容易的。
+
 
 ## 创新点
 
@@ -266,7 +272,7 @@ openssl x509 -req -days 365 -sha256  -in client.csr -CA ca.crt -CAkey ca.key -se
 
 ### 协议
 
-实现了vless协议（v0，v1）和vlesss（即vless+tcp+tls），
+实现了vless协议（v0，v1）
 
 在本项目里 制定 并实现了 vless v1标准 (还在继续研发新功能），添加了非mux的fullcone；
 
@@ -281,7 +287,7 @@ openssl x509 -req -days 365 -sha256  -in client.csr -CA ca.crt -CAkey ca.key -se
 
 ### 架构
 
-使用了简单的架构，单单因为架构简单 就可以 提升不少性能。
+使用了简单的架构，单单因为架构简单 就可以 提升不少性能。而且可执行文件比其他内核小不少。
 
 本作使用了分层架构，网络层，tls层，高级层，代理层等层级互不影响。
 
@@ -295,19 +301,17 @@ v0协议是直接兼容现有v2ray/xray的，比如可以客户端用任何现�
 
 ### 命令行
 
-本作的命令行界面还在开发一种 “交互模式”，欢迎下载体验，使用 `-i` 参数打开。也欢迎提交PR 来丰富 交互模式的功能。
+本作的命令行界面还有一种 “交互模式”，欢迎下载体验，使用 `-i` 参数打开。也欢迎提交PR 来丰富 交互模式的功能。
 
 ### 创新之外的已实现的有用特性
 
 支持trojan协议 以及smux, 而且经过测速，比trojan-go快。（速度差距和本作的vless与v2ray的vless的差距基本一致，所以就不放出测速文件了，参考vless即可）
 
-不过 lazy特性是不支持trojan的。这种不稳定不安全的特性还是专用在一个协议上比较好。
-
 在没有mmdb文件时，自动下载mmdb
 
 使用readv 进行加速
 
-其它监听协议还支持 socks5, http, dokodemo
+其它监听协议还支持 socks5, http, dokodemo,vmess, simplesocks, shadowsocks 等
 
 多种配置文件格式,包括自有的 toml标准格式
 
@@ -321,21 +325,21 @@ v0协议是直接兼容现有v2ray/xray的，比如可以客户端用任何现�
 
 支持grpc，与 xray/v2ray兼容; 还有 grpcSimple，见上文。
 
-真实 nginx响应。
+真实 nginx拒绝响应。
 
 支持 quic以及hysteria 阻控，与xray/v2ray兼容（详情见wiki）,还新开发了“手动挡”模式
 
-api服务器；tproxy 透明代理； http伪装头.
+api服务器；tproxy 透明代理； http头(即所谓的混淆、伪装头等), 该模式下还支持回落。
 
-本作也是支持 trojan-go 声称的 “可插拔模块”的，没什么复杂的。而且也可以用build tag 来开启或关闭某项功能。
+本作支持 trojan-go 的 “可插拔模块”模式的。而且也可以用build tag 来开启或关闭某项功能。不过本作为了速度，耦合高一些。
 
-本作也是支持 clash 的 "use as library" 的，而且更加简单，very simple，你看godoc文档就懂了，主项目就一个主要的函数。
+本作也是支持 clash 的 "use as library" 的，而且 very simple，看godoc文档就懂了，主项目就一个主要的函数。
 
 支持 Docker 容器, 见 #56，以及 cmd/verysimple/Dockerfile,  相关问题请找 该PR作者。
 
+可生成各种第三方分享链接格式;
+
 总之，可以看到，几乎在每一个技术上 本作都有一定的优化，超越其他内核，非常 Nice。
-
-
 
 ## 技术详情
 
@@ -343,12 +347,12 @@ api服务器；tproxy 透明代理； http伪装头.
 
 这也是我单独写一个 v2ray_simple 的原因。 v2ray的架构实在是非常落后，无法施展拳脚，而clash 和 trojan-go 则先进很多。
 
-同时，vmess这种 信息熵 太大 的协议已经 应该退出历史舞台，本作予以淘汰，不再支持。
 
 目前认为只有外层为 tls 的、支持回落的 协议才是主流。
 
-然而，最近墙的 sni 阻断行为再一次打我脸了。看来 vmess/ssr 这种完全随机的协议还是有必要继续使用。。。
+而 vmess这种 信息熵 太大 的协议已经 应该退出历史舞台，然而，最近墙的 sni 阻断行为再一次打我脸了。看来 vmess/ssr 这种完全随机的协议还是有必要继续使用。。。
 
+总之，世界一直在变化，技术的采用 也要随机应变。
 
 
 ### 关于vless v1
@@ -363,7 +367,7 @@ v1还有很多其他新设计，比如用于 连接池和 dns等，详见 [vless
 
 vless v1协议还处在开发阶段，我随时可能新增、修改定义。
 
-因为本作率先提出了 vless v1的开发，所以本作的版本号 也直接从 v1.0.0开始
+因为本作率先提出了 vless v1的开发，所以本作的版本号 也直接从 v1.0.0开始 (手动狗头～)
 
 ### 关于udp
 
@@ -420,7 +424,7 @@ tls lazy encrypt 特性 运行时可以用 -lazy 参数打开（服务端客户�
 
 
 
-#### 总结 tls lazy encrypt 技术优点
+#### 总结 tls lazy encrypt (tle) 技术优点
 
 解决了xtls以下痛点
 
@@ -431,10 +435,10 @@ tls lazy encrypt 特性 运行时可以用 -lazy 参数打开（服务端客户�
 
 原因：
 
-1. 我不使用循环进行tls过滤，而且不魔改tls包
-2. 我直接开启了双向splice；xtls只能优化客户端性能，我们两端都会优化;一般而言大部分服务器都是linux的，所以这样就大大提升了所有连接的性能.
-3. 因为我的vless v1的fullcone是非mux的，分离信道，所以说是可以应用splice的（以后会添加支持，可能需要加一些代码，有待考察）
-4. 因为我不魔改tls包，所以说可以套任何tls包的，比如utls，目前已经添加了utls。所以你可以享受伪装的同时享受splice
+1. tle 不使用循环进行tls过滤，而且不魔改tls包
+2. tle直接开启了双向splice；xtls只能优化客户端性能，tle两端都会优化;一般而言大部分服务器都是linux的，所以这样就大大提升了所有连接的性能.
+3. 因为tle的vless v1的fullcone是非mux的，分离信道，所以说是可以应用splice的（以后会添加支持，可能需要加一些代码，有待考察）
+4. 因为tle不魔改tls包，所以说可以套任何tls包的，比如utls，目前已经添加了utls。所以你可以享受伪装的同时享受splice
 
 而且alert根本不需要过滤，因为反正xtls本身过滤了还是有两个issue存在，是吧。
 
@@ -463,9 +467,16 @@ tls lazy encrypt 特性 运行时可以用 -lazy 参数打开（服务端客户�
 
 ## 开发标准以及理念
 
+KISS, Keep it Simple and Stupid
+
 文档尽量多，代码尽量少. 同时本作不追求极致模块化, 可以进行适当耦合. 一切以速度、浅显易懂 优先
 
-KISS, Keep it Simple and Stupid
+如果你阅读代码，你有时可能看到一些“比较脏” 的代码，如包含一些 goto 跳跃，或者步骤比较繁琐的函数。
+但仔细思考比较，就会发现，这种代码的不是运行速度更快，就是更加直观易懂。
+
+比如某些需要defer的地方，我们故意不defer，而是单独放在每个return前面。这是因为defer会降低性能。类似的地方有很多。
+
+当然，如果美化代码利大于弊，我们肯定在后期慢慢改进。
 
 ### 文档
 
@@ -509,20 +520,49 @@ MIT协议，即你用的时候也要附带一个MIT文件，然后作者不承�
 
 ## 历史
 
-启发自我fork的v2simple，不过原作者的架构还是有点欠缺，我就直接完全重构了，完全使用我自己的代码。
+首先阅读v2simple项目，一个很好的启蒙项目：
+https://github.com/jarvisgally/v2simple
 
-这样也杜绝了 原作者跑路 导致的 一些不懂法律的人对于开源许可的 质疑。
+读了v2simple后, 我fork了一个版本, 不过原作者没附带任何开源协议，而且原作者的架构还是有点欠缺。
 
-实际上是毫无问题的，关键是他们太谨慎。无所谓，现在我完全自己写，没话说了吧—；
+后来就直接完全重构了，新建了本项目，完全使用自己的代码。没想到大有发展，功高盖主。
 
-我fork也是尊重原作者，既然你们这么谨慎，正好推动了我的重构计划，推动了历史发展
-## 额外说明 以及 开发计划
+但是，本作继承了v2simple的精神，即尽量simple。我极力支持这种精神，也试图让这个精神在verysimple项目中处处体现。
 
-目前正在计划的有
+本作继承了它的如下特点：
+
+1. url配置的方式
+2. 转发逻辑直接放在main.go 中
+3. 架构简单
+
+
+## 本作对其它项目的启发
+
+优秀的东西总是会被模仿，但是有一些东西从未被超越。我们在模仿别人，别人也在模仿我们，不知不觉中共同创造了一个越来越棒的开源环境。
+
+### v2ray项目
+本作提倡对vless v1的进一步开发后， v2ray项目直接决定放弃vless 协议。（手动狗头～）
+
+### xray项目
+本作对xtls漏洞以及lazy技术的先行研究启发了xray项目，几个月后，其开发了 vision 流控。本作也算为代理界做出了一些贡献～。
+
+不过xray的架构太复杂，很难将这个流控应用到所有协议上。而本作因为架构优良，lazy是直接可以用于没有内部加密的任何协议的，如vless,trojan,simplesocks,socks
+
+本作实现grpc后就直接支持utls的，xray几个月后通过开发者的PR跟进。
+
+### sing-box项目
+本作对gun-lite客户端的先行研究，反推出了 gun-lite的服务端代码。 几个月后 sing-box也通过一个开发者的PR跟进了, 不过其依然没有支持grpcSimple的独特的回落到h2的功能
+
+这可能是因为sing-box的架构与v2ray/xray的架构比较类似，都比较复杂，难以施展拳脚，而为了支持h2回落，需要一些特殊技巧。
+
+
+## 开发计划
+
+远期计划有
 
 1. 完善并实现 vless v1协议
-2. 什么时候搞一个 verysimple_c 项目，用c语言照着写一遍; 也就是说，就算本verysimple没有任何技术创新，单单架构简单也是有技术优势的，可以作为参考 实现更底层的 c语言实现。
-3. verysimple_c 写好后，就可以尝试将 naiveproxy 嵌入 verysimple_c 了
+2. 什么时候搞一个 verysimple_c 项目，用c语言照着写一遍; 也就是说，就算本verysimple没有任何技术创新，单单架构简单也是有技术优势的，可以作为参考 实现更底层的 c语言实现。之后本以为可以加入naiveproxy，但是实际发现没那么简单.
+3. verysimple_rust 项目。同上。
 4. 完善 tls lazy encrypt技术
 5. 链接池技术，可以重用与服务端的连接 来发起新请求
 6. 握手延迟窗口技术，可用于分流一部分流量使用mux发送，达到精准降低延迟的目的；然后零星的链接依然使用单独信道。
@@ -547,6 +587,9 @@ https://github.com/e1732a364fed/v2ray_simple/discussions/3
 ```
 ./verysimple -c ../../examples/quic.server.toml -ll 0
 ```
+
+</details>
+
 
 ## 测速
 
@@ -609,36 +652,15 @@ verysimple 版本 v1.0.3
 
 测速时，打开的窗口尽量少，且只留浏览器的窗口在最前方。已经证明多余的窗口会影响速率。尤其是这种消耗cpu性能的情况，在核显的电脑上确实要保证cpu其它压力减到最小。
 
-## 交流
+## 交流与思想
 
 群肯定是有的。只在此山中，云深不知处。实际上每一个群都有可能是verysimple群，每一个成员都有可能是verysimple的作者。
 
-如果你实在找不到群，你不妨自己建一个，然后自称verysimple项目作者。
-
-建议所有的人都认真阅读README以及其它所有有文字的文件和页面；
-
-有能力的人要阅读整个verysimple项目的所有代码；
-
-希望每一个人都能站出来，自豪地说，“我就是原作者”，并且能够滔滔不绝地讲解自己对verysimple的架构的理解。
-
-如果你能fork，并青出于蓝，那么我甘拜下风。
-
-也希望本项目能够普及到世界上所有需要学习相关技术的国家，希望所有的想要学习代码的人都能够先学习中文。
+如果你实在找不到群，你不妨自己建一个。希望每一个人都能站出来，自豪地说，“我就是原作者”，并且能够滔滔不绝地讲解自己对verysimple的架构的理解。关键不在于谁是作者，一个作者倒下，千万个作者会站起来。
 
 如果本作作者突然停更，这里允许任何人以 verysimple 作者的名义fork并 接盘。你只要声称自己是原作者，忘记了github和自己邮箱的密码，只好重开，这不就ok了。
 
-关键不在于谁是作者，一个作者倒下，千万个作者会站起来。
-
-我们的思想 生生不息，追求自由的人们啊，一起奋斗吧！
-
->鱼，我所欲也；熊掌，亦我所欲也。二者不可得兼，舍鱼而取熊掌者也。生，亦我所欲也；义，亦我所欲也。二者不可得兼，舍生而取义者也。
-
->砍头不要紧，
-只要主义真。
-杀了夏明翰，
-还有后来人。
-
-
+telegram channel: https://t.me/+r5hKQKYyeuowMTcx
 
 
 # 免责声明与鸣谢
@@ -656,11 +678,11 @@ MIT协议！作者不负任何责任。本项目 适合内网测试使用，以�
 
 ## 鸣谢
 
-为了支持hysteria 的阻塞控制，从 https://github.com/HyNetwork/hysteria 的 pkg/congestion里拷贝了 brutal.go 和 pacer.go 到我们的 quic文件夹中.
+为了支持hysteria 的阻塞控制，从 [hysteria](https://github.com/HyNetwork/hysteria) 的 pkg/congestion里拷贝了 brutal.go 和 pacer.go 到我们的 quic文件夹中.
 
-grpcSimple的客户端实现部分 借鉴了 clash 的gun的代码，该文件单独属于MIT协议，其文件开头都写了，不信自己看。（clash的gun又是借鉴 Qv2ray的gun的）
+grpcSimple的客户端实现部分 借鉴了 clash 的gun的代码，该文件单独属于MIT协议。(clash的gun又是借鉴 Qv2ray的gun的）
 
-tproxy借鉴了 https://github.com/LiamHaworth/go-tproxy/ , （trojan-go也借鉴了它）
+tproxy借鉴了 [这个](https://github.com/LiamHaworth/go-tproxy/) , （trojan-go也借鉴了它; 它有数个bug, 已经都在本作修复）
 
 来自v2ray的代码有：quic的嗅探，geosite文件的解析(v2fly/domain-list-community), vmess的 ShakeSizeParser 和 openAEADHeader 等函数。
 
@@ -668,9 +690,11 @@ tproxy借鉴了 https://github.com/LiamHaworth/go-tproxy/ , （trojan-go也借�
 
 以上借鉴的代码都是用的MIT协议。
 
-vmess 的客户端代码 来自 github.com/Dreamacro/clash/transport/vmess, 使用的是 GPLv3协议。该协议我直接 放在 proxy/vmess/ 文件夹下了。
+vmess 的客户端代码 来自 [clash](https://github.com/Dreamacro/clash/transport/vmess), 使用的是 GPLv3协议。该协议直接 放在 proxy/vmess/ 文件夹下了。
 
-同时我通过该vmess 客户端代码 反推出了 对应的服务端代码。
+同时通过该vmess 客户端代码 反推出了 对应的服务端代码。
+
+tun 的代码 来自 [tun2socks](https://github.com/xjasonlyu/tun2socks) , 使用的是 GPLv3协议。该协议直接放在 netLayer/tun 文件夹下了。
 
 ## Stargazers over time
 

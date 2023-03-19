@@ -24,15 +24,16 @@ type Conn struct {
 
 	serverEndGotEarlyData []byte
 
+	underlayIsTCP   bool
 	underlayIsBasic bool
 
 	bigHeaderEverUsed bool
+
+	realRaddr net.Addr //可从 X-Forwarded-For 读取用户真实ip，用于反代等情况
 }
 
-//Read websocket binary frames
+// Read websocket binary frames
 func (c *Conn) Read(p []byte) (int, error) {
-
-	//log.Println("real ws read called", len(p))
 
 	if len(c.serverEndGotEarlyData) > 0 {
 		n := copy(p, c.serverEndGotEarlyData)
@@ -50,9 +51,9 @@ func (c *Conn) Read(p []byte) (int, error) {
 	//关于读 的完整过程，建议参考 ws/example.autoban.go 里的 wsHandler 函数
 
 	if c.remainLenForLastFrame > 0 {
-		//log.Println("c.remainLenForLastFrame > 0", c.remainLenForLastFrame)
+
 		n, e := c.r.Read(p)
-		//log.Println("c.remainLenForLastFrame > 0, read ok", n, e, c.remainLenForLastFrame-int64(n))
+
 		if e != nil && e != io.EOF {
 			return n, e
 		}
@@ -66,7 +67,6 @@ func (c *Conn) Read(p []byte) (int, error) {
 		return 0, e
 	}
 	if h.OpCode.IsControl() {
-		//log.Println("Got control frame")
 
 		// 控制帧已经在我们的 OnIntermediate 里被处理了, 直接读取下一个数据即可
 		return c.Read(p)
@@ -86,7 +86,6 @@ func (c *Conn) Read(p []byte) (int, error) {
 
 		return 0, utils.ErrInErr{ErrDesc: "ws OpCode not OpBinary/OpContinuation", Data: h.OpCode}
 	}
-	//log.Println("Read next frame header ok,", h.Length, c.r.State.Fragmented(), "givenbuf len", len(p))
 
 	c.remainLenForLastFrame = h.Length
 
@@ -102,24 +101,22 @@ func (c *Conn) Read(p []byte) (int, error) {
 	//这种产生EOF的情况，是 gobwas/ws包的一种特性，这样可以说每一次读取都能有明确的EOF边界，便于使用 io.ReadAll
 
 	n, e := c.r.Read(p)
-	//log.Println("read data result", e, n, h.Length)
 
 	c.remainLenForLastFrame -= int64(n)
 
 	if e != nil && e != io.EOF {
 
-		//log.Println("e", e, n, string(p[:n]), p[:n])
 		return n, e
 
 	}
 	return n, nil
 }
 
-func (c *Conn) EverPossibleToSplice() bool {
-	return c.underlayIsBasic && c.state == ws.StateServerSide
+func (c *Conn) EverPossibleToSpliceWrite() bool {
+	return c.underlayIsTCP && c.state == ws.StateServerSide
 }
 
-//采用 “超长包” 的办法 试图进行splice
+// 采用 “超长包” 的办法 试图进行splice
 func (c *Conn) tryWriteBigHeader() (e error) {
 	if c.bigHeaderEverUsed {
 		return
@@ -137,21 +134,28 @@ func (c *Conn) tryWriteBigHeader() (e error) {
 	return
 }
 
-func (c *Conn) CanSplice() (r bool, conn net.Conn) {
-	if !c.EverPossibleToSplice() {
+func (c *Conn) CanSpliceWrite() (r bool, conn *net.TCPConn) {
+	if !c.EverPossibleToSpliceWrite() {
 		return
 	}
 
 	if c.tryWriteBigHeader() != nil {
 		return
 	}
-	return true, c.Conn
+
+	if tc := netLayer.IsTCP(c.Conn); tc != nil {
+		r = true
+		conn = tc
+
+	}
+
+	return
 
 }
 
 func (c *Conn) ReadFrom(r io.Reader) (written int64, err error) {
 	if c.state == ws.StateClientSide {
-		return netLayer.ClassicCopy(c, r)
+		return utils.ClassicCopy(c, r)
 	}
 
 	//采用 “超长包” 的办法 试图进行splice
@@ -160,11 +164,11 @@ func (c *Conn) ReadFrom(r io.Reader) (written int64, err error) {
 	if e != nil {
 		return 0, e
 	}
-	if c.underlayIsBasic {
+	if c.underlayIsTCP {
 		if rt, ok := c.Conn.(io.ReaderFrom); ok {
 			return rt.ReadFrom(r)
 		} else {
-			panic("ws.Conn underlayIsBasic, but can't cast to ReadFrom")
+			panic("ws.Conn underlayIsTCP, but can't cast to ReadFrom")
 		}
 	}
 
@@ -173,7 +177,7 @@ func (c *Conn) ReadFrom(r io.Reader) (written int64, err error) {
 	})
 }
 
-//实现 utils.MultiWriter
+// 实现 utils.MultiWriter
 // 主要是针对一串数据的情况，如果底层连接可以用writev， 此时我们不要每一小段都包包头 然后写N次，
 // 而是只在最前面包数据头，然后即可用writev 一次发送出去
 // 比如从 socks5 读数据，写入 tcp +ws + vless 协议, 就是这种情况
@@ -245,9 +249,8 @@ func (c *Conn) WriteBuffers(buffers [][]byte) (int64, error) {
 	}
 }
 
-//Write websocket binary frames
+// Write websocket binary frames
 func (c *Conn) Write(p []byte) (n int, e error) {
-	//log.Println("ws Write called", len(p))
 
 	//查看了代码，wsutil.WriteClientBinary 等类似函数会直接调用 ws.WriteFrame， 是不分片的.
 	// 不分片的效率更高,因为无需缓存,zero copy
@@ -257,7 +260,6 @@ func (c *Conn) Write(p []byte) (n int, e error) {
 	} else {
 		e = wsutil.WriteServerBinary(c.Conn, p)
 	}
-	//log.Println("ws Write finished", n, e, len(p))
 
 	if e == nil {
 		n = len(p)
@@ -293,4 +295,11 @@ func (c *Conn) Write(p []byte) (n int, e error) {
 		return
 	*/
 
+}
+
+func (c *Conn) RemoteAddr() net.Addr {
+	if c.realRaddr != nil {
+		return c.realRaddr
+	}
+	return c.Conn.RemoteAddr()
 }

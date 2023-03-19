@@ -15,10 +15,10 @@ func init() {
 	proxy.RegisterServer(Name, &ServerCreator{})
 }
 
-type ServerCreator struct{}
+type ServerCreator struct{ proxy.CreatorCommonStruct }
 
 func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
-	uuidStr := lc.Uuid
+	uuidStr := lc.UUID
 
 	s := newServer(uuidStr)
 
@@ -29,11 +29,20 @@ func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 	return s, nil
 }
 
-func (ServerCreator) NewServerFromURL(url *url.URL) (proxy.Server, error) {
-	uuidStr := url.User.Username()
-	s := newServer(uuidStr)
+func (ServerCreator) URLToListenConf(url *url.URL, lc *proxy.ListenConf, format int) (*proxy.ListenConf, error) {
 
-	return s, nil
+	switch format {
+	case proxy.UrlStandardFormat:
+		if lc == nil {
+			lc = &proxy.ListenConf{}
+			uuidStr := url.User.Username()
+			lc.UUID = uuidStr
+		}
+
+		return lc, nil
+	default:
+		return nil, utils.ErrUnImplemented
+	}
 }
 
 func newServer(plainPassStr string) *Server {
@@ -52,7 +61,7 @@ func newServer(plainPassStr string) *Server {
 	return s
 }
 
-//implements proxy.Server
+// implements proxy.Server
 type Server struct {
 	proxy.Base
 
@@ -71,20 +80,43 @@ func (*Server) CanFallback() bool {
 	return true
 }
 
-//若握手步骤数据不对, 会返回 ErrDetail 为 utils.ErrInvalidData 的 utils.ErrInErr
+// 若握手步骤数据不对, 会返回 ErrDetail 为 utils.ErrInvalidData 的 utils.ErrInErr
 func (s *Server) Handshake(underlay net.Conn) (result net.Conn, msgConn netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
-	if err := proxy.SetCommonReadTimeout(underlay); err != nil {
+	if err := netLayer.SetCommonReadTimeout(underlay); err != nil {
 		returnErr = err
 		return
 	}
 	defer netLayer.PersistConn(underlay)
 
-	readbs := utils.GetBytes(utils.MTU)
+	const readMaxLen = utils.MTU
 
-	wholeReadLen, err := underlay.Read(readbs)
-	if err != nil {
-		returnErr = utils.ErrInErr{ErrDesc: "read underlay failed", ErrDetail: err, Data: wholeReadLen}
-		return
+	readbs := utils.GetBytes(readMaxLen)
+
+	var wholeReadLen int
+
+	//根据 https://www.ihcblog.com/a-better-tls-obfs-proxy/
+	//trojan的 CRLF 是为了模拟http服务器的行为, 所以此时不要一次性Read，而是要Read到CRLF为止
+
+	// wholeReadLen, err := underlay.Read(readbs)
+	// if err != nil {
+	// 	returnErr = utils.ErrInErr{ErrDesc: "read underlay failed", ErrDetail: err, Data: wholeReadLen}
+	// 	return
+	// }
+
+	for {
+		thislen, e := underlay.Read(readbs[wholeReadLen:])
+		if e != nil {
+			returnErr = utils.ErrInErr{ErrDesc: "read underlay failed", ErrDetail: e, Data: wholeReadLen}
+			return
+		}
+		lastTail := wholeReadLen
+		wholeReadLen += thislen
+
+		index_crlf := bytes.Index(readbs[lastTail:wholeReadLen], crlf)
+
+		if index_crlf > 0 || wholeReadLen >= readMaxLen {
+			break
+		}
 	}
 
 	if wholeReadLen < 17 {
@@ -159,9 +191,10 @@ realPart:
 		//trojan-gfw 那个文档里并没有提及Mux, 这个定义作者似乎没有在任何文档中提及，所以是在go文件中找到的。
 		// 根据 tunnel/trojan/server.go, 如果申请的域名是 MUX_CONN, 则 就算是CmdConnect 也会被认为是mux
 
-		//关于 trojan实现多路复用的方式，可参考 https://p4gefau1t.github.io/trojan-go/developer/mux/
+		//关于 trojan实现多路复用的方式，可参考 https://p4gefau1t.github.io/trojan-go/developer/mux/  (该链接只是泛泛提了一下而已，没有制定具体实现的标准)
 		ismux = true
 	}
+	var err error
 
 	targetAddr, err = GetAddrFrom(readbuf, ismux)
 	if err != nil {
@@ -187,7 +220,9 @@ realPart:
 	}
 
 	if ismux {
-		mh := &proxy.MuxMarkerConn{
+		mh := &proxy.UserReadWrapper{
+			Mux:  true,
+			User: theUser.(User),
 			ReadWrapper: netLayer.ReadWrapper{
 				Conn: underlay,
 			},
@@ -209,14 +244,20 @@ realPart:
 	} else {
 		// 发现直接返回 underlay 反倒无法利用readv, 所以还是统一用包装过的. 目前利用readv是可以加速的.
 
-		return &UserTCPConn{
+		uc := &UserTCPConn{
 			Conn:              underlay,
 			User:              theUser.(User),
 			optionalReader:    io.MultiReader(readbuf, underlay),
 			remainFirstBufLen: readbuf.Len(),
 			underlayIsBasic:   netLayer.IsBasicConn(underlay),
 			isServerEnd:       true,
-		}, nil, targetAddr, nil
+		}
+
+		if mw, ok := underlay.(utils.MultiWriter); ok {
+			uc.mw = mw
+		}
+
+		return uc, nil, targetAddr, nil
 
 	}
 }

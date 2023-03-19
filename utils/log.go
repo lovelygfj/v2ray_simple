@@ -2,6 +2,7 @@ package utils
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/natefinch/lumberjack"
@@ -24,10 +25,11 @@ const (
 
 // LogLevel 值越小越唠叨, 废话越多，值越大打印的越少，见log_开头的常量;
 //
-//我们的loglevel具体值 与 zap的 loglevel+1 的含义等价
+// 我们的loglevel具体值 与 zap的 loglevel+1 的含义等价
 var (
-	LogLevel  int
-	ZapLogger *zap.Logger
+	LogLevel        int
+	LogLevelForFile int = -1 //这一项如果非负，则控制台的日志等级按 LogLevel 走，日志文件登记按 LogLevelForFile 走, 否则都按 LogLevel 走
+	ZapLogger       *zap.Logger
 
 	//日志输出文件名称
 	LogOutFileName string
@@ -55,7 +57,15 @@ func getZapLogFileWriteSyncer(fn string) zapcore.WriteSyncer {
 	})
 }
 
-//为了输出日志保持整齐, 统一使用5字节长度的字符串, 少的加尾缀空格, 多的以 点号 进行缩写。
+func LogLevel5CharList() (sl []string) {
+	sl = make([]string, 0, log_off)
+	for i := -1; i < log_off-1; i++ {
+		sl = append(sl, levelCapitalStrWith5Chars(zapcore.Level(i)))
+	}
+	return
+}
+
+// 为了输出日志保持整齐, 统一使用5字节长度的字符串, 少的加尾缀空格, 多的以 点号 进行缩写。
 func levelCapitalStrWith5Chars(l zapcore.Level) string {
 	switch l {
 	case zapcore.DebugLevel:
@@ -73,14 +83,14 @@ func levelCapitalStrWith5Chars(l zapcore.Level) string {
 	case zapcore.FatalLevel:
 		return "FATAL"
 	default:
-		return fmt.Sprintf("LEVEL(%d)", l)
+		return fmt.Sprintf("LVL.%d", l)
 	}
 }
 func capitalLevelEncoderWith5Chars(l zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	enc.AppendString(levelCapitalStrWith5Chars(l))
 }
 
-//本作大量用到zap打印输出, 所以必须调用InitLog函数来初始化，否则就会闪退
+// 本作大量用到zap打印输出, 所以必须调用InitLog函数来初始化，否则就会闪退
 func InitLog(firstMsg string) {
 	atomicLevel := zap.NewAtomicLevel()
 	atomicLevel.SetLevel(zapcore.Level(LogLevel - 1))
@@ -103,7 +113,17 @@ func InitLog(firstMsg string) {
 		jsonConf.TimeKey = "T"
 		jsonConf.MessageKey = "M"
 		jsonConf.EncodeLevel = capitalLevelEncoderWith5Chars
-		jsonCore := zapcore.NewCore(zapcore.NewJSONEncoder(jsonConf), getZapLogFileWriteSyncer(LogOutFileName), atomicLevel)
+
+		var logfileLevel zapcore.LevelEnabler = atomicLevel
+
+		if LogLevelForFile >= 0 {
+			lff := zapcore.Level(LogLevelForFile - 1)
+			logfileLevel = zap.LevelEnablerFunc(func(lev zapcore.Level) bool {
+				return lev >= lff
+			})
+		}
+
+		jsonCore := zapcore.NewCore(zapcore.NewJSONEncoder(jsonConf), getZapLogFileWriteSyncer(LogOutFileName), logfileLevel)
 
 		ZapLogger = zap.New(zapcore.NewTee(consoleCore, jsonCore))
 
@@ -113,7 +133,8 @@ func InitLog(firstMsg string) {
 	}
 
 	if firstMsg != "" {
-		ZapLogger.Info(firstMsg)
+		ZapLogger.Info(firstMsg, zap.Int("loglvl", LogLevel))
+		log.Println(firstMsg, LogLevel)
 	}
 
 	if willLogToFile {
@@ -168,18 +189,27 @@ func CanLogFatal(msg string) *zapcore.CheckedEntry {
 
 }
 
+// assume ZapLogger is not nil.
 func Debug(msg string) {
 	ZapLogger.Debug(msg)
 }
+
+// assume ZapLogger is not nil.
 func Info(msg string) {
 	ZapLogger.Info(msg)
 }
+
+// assume ZapLogger is not nil.
 func Warn(msg string) {
 	ZapLogger.Warn(msg)
 }
+
+// assume ZapLogger is not nil.
 func Error(msg string) {
 	ZapLogger.Error(msg)
 }
+
+// assume ZapLogger is not nil.
 func Fatal(msg string) {
 	ZapLogger.Fatal(msg)
 }

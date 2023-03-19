@@ -2,8 +2,8 @@ package tlsLayer
 
 import (
 	"errors"
-	"io/ioutil"
 	mathrand "math/rand"
+	"strings"
 
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -34,7 +34,7 @@ func LoadCA(caFile string) (cp *x509.CertPool, err error) {
 		return
 	}
 	cp = x509.NewCertPool()
-	data, err := ioutil.ReadFile(caFile)
+	data, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +44,7 @@ func LoadCA(caFile string) (cp *x509.CertPool, err error) {
 	return
 }
 
-//使用 ecc p256 方式生成证书
+// 使用 ecc p256 方式生成证书
 func GenerateRandomeCert_Key() (certPEM []byte, keyPEM []byte) {
 
 	//可参考 https://blog.ideawand.com/2017/11/22/build-certificate-that-support-Subject-Alternative-Name-SAN/
@@ -53,10 +53,6 @@ func GenerateRandomeCert_Key() (certPEM []byte, keyPEM []byte) {
 	country := clist[mathrand.Intn(len(clist))]
 
 	companyName := utils.GetRandomWord()
-
-	if ce := utils.CanLogInfo("generate random cert with"); ce != nil {
-		ce.Write(zap.String("country", country.Info().Name), zap.String("company", companyName))
-	}
 
 	subject := pkix.Name{
 		Country:            []string{country.Alpha2()},
@@ -93,6 +89,11 @@ func GenerateRandomeCert_Key() (certPEM []byte, keyPEM []byte) {
 		panic(err)
 	}
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+
+	if ce := utils.CanLogInfo("Generate random cert with"); ce != nil {
+		ce.Write(zap.String("country", country.Info().Name), zap.String("company", companyName), zap.String("sni", template.Subject.CommonName))
+	}
+
 	return
 
 	/*
@@ -143,13 +144,13 @@ func GenerateRandomCertKeyFiles(cfn, kfn string) error {
 	return nil
 }
 
-//若 certFile, keyFile 有一项没给出，则会自动生成随机证书
+// 若 certFile, keyFile 有一项没给出，则会自动生成随机证书
 func GetCertArrayFromFile(certFile, keyFile string) (certArray []tls.Certificate, err error) {
 	if certFile != "" && keyFile != "" {
 		cert, err := tls.LoadX509KeyPair(utils.GetFilePath(certFile), utils.GetFilePath(keyFile))
 		if err != nil {
 
-			if ce := utils.CanLogErr("GetCertArrayFromFile failed, will use generated random cert in memory"); ce != nil {
+			if ce := utils.CanLogErr("Failed in GetCertArrayFromFile reading cert and key files, will use generated random cert in memory"); ce != nil {
 				ce.Write(zap.Error(err))
 			}
 
@@ -168,4 +169,40 @@ func GetCertArrayFromFile(certFile, keyFile string) (certArray []tls.Certificate
 	}
 
 	return
+}
+
+func rejectUnknownGetCertificateFunc(certs []*tls.Certificate) func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if len(certs) == 0 {
+			return nil, utils.ErrInErr{ErrDesc: "len(certs) == 0", ErrDetail: utils.ErrInvalidData}
+		}
+		if hello == nil {
+			return nil, utils.ErrInErr{ErrDesc: "hello==nil", ErrDetail: utils.ErrInvalidData}
+		}
+		sni := strings.ToLower(hello.ServerName)
+
+		gsni := "*"
+		if index := strings.IndexByte(sni, '.'); index != -1 {
+			gsni += sni[index:]
+		}
+		for _, cert := range certs {
+			if cert.Leaf == nil {
+				var e error
+				cert.Leaf, e = x509.ParseCertificate(cert.Certificate[0])
+				if e != nil {
+					return nil, utils.ErrInErr{ErrDesc: "rejectUnknown: x509.ParseCertificate failed ", ErrDetail: e}
+				}
+			}
+
+			if cert.Leaf.Subject.CommonName == sni || cert.Leaf.Subject.CommonName == gsni {
+				return cert, nil
+			}
+			for _, name := range cert.Leaf.DNSNames {
+				if name == sni || name == gsni {
+					return cert, nil
+				}
+			}
+		}
+		return nil, utils.ErrInErr{ErrDesc: "rejectUnknownSNI", ErrDetail: utils.ErrInvalidData, Data: sni}
+	}
 }

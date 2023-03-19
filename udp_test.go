@@ -11,6 +11,17 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/proxy/socks5"
 	"github.com/e1732a364fed/v2ray_simple/utils"
 	"github.com/miekg/dns"
+
+	_ "github.com/e1732a364fed/v2ray_simple/advLayer/grpcSimple"
+	_ "github.com/e1732a364fed/v2ray_simple/advLayer/ws"
+
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/dokodemo"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/shadowsocks"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/simplesocks"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/socks5http"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/trojan"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/vless"
+	_ "github.com/e1732a364fed/v2ray_simple/proxy/vmess"
 )
 
 func TestUDP_vless(t *testing.T) {
@@ -51,7 +62,7 @@ func TestUDP_trojan_through_udp(t *testing.T) {
 	testUDP(t, "trojan", 0, "udp", false, false, false)
 }
 
-//udp测试我们直接使用dns请求来测试.
+// udp测试我们直接使用dns请求来测试.
 func testUDP(t *testing.T, protocol string, version int, network string, multi bool, fullcone bool, mux bool) {
 	utils.LogLevel = utils.Log_debug
 	utils.InitLog("")
@@ -137,12 +148,12 @@ protocol = "direct"
 
 	testServerConfStr := fmt.Sprintf(testServerConfFormatStr, protocol, clientDialPort, version, network)
 
-	clientConf, err := proxy.LoadTomlConfStr(testClientConfStr)
+	clientConf, err := proxy.LoadStandardConfFromTomlStr(testClientConfStr)
 	if err != nil {
 		t.Log(err)
 		t.FailNow()
 	}
-	serverConf, err := proxy.LoadTomlConfStr(testServerConfStr)
+	serverConf, err := proxy.LoadStandardConfFromTomlStr(testServerConfStr)
 	if err != nil {
 		t.Log(err)
 		t.FailNow()
@@ -191,10 +202,10 @@ protocol = "direct"
 		t.FailNow()
 	}
 
-	c1 := v2ray_simple.ListenSer(clientEndInServer, clientEndOutClient, nil)
-	c2 := v2ray_simple.ListenSer(clientEndInServer2, clientEndOutClient, nil)
-	c3 := v2ray_simple.ListenSer(clientEndInServer3, clientEndOutClient, nil)
-	c4 := v2ray_simple.ListenSer(serverEndInServer, serverEndOutClient, nil)
+	c1 := v2ray_simple.ListenSer(clientEndInServer, clientEndOutClient, nil, nil)
+	c2 := v2ray_simple.ListenSer(clientEndInServer2, clientEndOutClient, nil, nil)
+	c3 := v2ray_simple.ListenSer(clientEndInServer3, clientEndOutClient, nil, nil)
+	c4 := v2ray_simple.ListenSer(serverEndInServer, serverEndOutClient, nil, nil)
 
 	if c1 != nil {
 		defer c1.Close()

@@ -27,8 +27,8 @@ func init() {
 
 }
 
-//有TLS, network为tcp或者unix, 无AdvLayer.
-//grpc 这种多路复用的链接是绝对无法开启 lazy的, ws 理论上也只有服务端发向客户端的链接 内嵌tls时可以lazy，但暂不考虑
+// 有TLS, network为tcp或者unix, 无AdvLayer.
+// grpc 这种多路复用的链接是绝对无法开启 lazy的, ws 理论上也只有服务端发向客户端的链接 内嵌tls时可以lazy，但暂不考虑
 func CanLazyEncrypt(x proxy.BaseInterface) bool {
 
 	return x.IsUseTLS() && CanNetwork_tlsLazy(x.Network()) && x.AdvancedLayer() == ""
@@ -43,8 +43,10 @@ func CanNetwork_tlsLazy(n string) bool {
 }
 
 // tryTlsLazyRawRelay 尝试能否直接对拷，对拷 直接使用 原始 TCPConn，也就是裸奔转发.
-//  如果在linux上，则和 xtls的splice 含义相同. 在其他系统时，与xtls-direct含义相同。
-// 我们内部先 使用 DetectConn进行过滤分析，然后再判断进化为splice / 退化为普通拷贝.
+//
+//	如果在linux上，则和 xtls的splice 含义相同. 在其他系统时，与xtls-direct含义相同。
+//
+// 我们内部先 使用 SniffConn 进行过滤分析，然后再判断进化为splice / 退化为普通拷贝.
 //
 // useSecureMethod仅用于 tls_lazy_secure
 func tryTlsLazyRawRelay(connid uint32, useSecureMethod bool, proxy_client proxy.UserClient, proxy_server proxy.UserServer, targetAddr netLayer.Addr, wrc, wlc io.ReadWriteCloser, localConn net.Conn, isclient bool, theRecorder *tlsLayer.Recorder) {
@@ -64,7 +66,7 @@ func tryTlsLazyRawRelay(connid uint32, useSecureMethod bool, proxy_client proxy.
 	// 之所以可以对拷直连，是因为无论是 socks5 还是vless，只是在最开始的部分 加了目标头，后面的所有tcp连接都是直接传输的数据，就是说，一开始握手什么的是不能直接对拷的，等到后期就可以了
 	// 而且之所以能对拷，还有个原因就是，远程服务器 与 客户端 总是源源不断地 为 我们的 原始 TCP 连接 提供数据，我们只是一个中间商而已，左手倒右手
 
-	// 如果是客户端，则 从 wlc 读取，写入 wrc ，这种情况是 Write, 然后对于 DetectConn 来说是 Read，即 从DetectConn读取，然后 写入到远程连接
+	// 如果是客户端，则 从 wlc 读取，写入 wrc ，这种情况是 Write, 然后对于 SniffConn 来说是 Read，即 SniffConn 读取，然后 写入到远程连接
 	// 如果是服务端，则 从 wrc 读取，写入 wlc， 这种情况是 Write
 	//
 	// 总之判断 Write 的对象，是考虑 客户端和服务端之间的数据传输，不考虑 远程真实服务器
@@ -87,12 +89,31 @@ func tryTlsLazyRawRelay(connid uint32, useSecureMethod bool, proxy_client proxy.
 		//wrc 有两种情况，如果客户端那就是tls，服务端那就是direct。我们不讨论服务端 处于中间层的情况
 
 		if isclient {
-			// 不过实际上客户端 wrc 是 vless的 UserConn， 而UserConn的底层连接才是TLS
-			// 很明显，目前我们只支持vless所以才可这么操作，以后再说。
+			// vless v0 或者trojan时，客户端 wrc 是 vless的 UserConn， 而UserConn的底层连接才是TLS
+			// 而vless v1时，在客户端是直接就是 *tlsLayer.Conn
 
-			wrcWrapper := wrc.(netLayer.ConnWrapper)
-			tlsConn := wrcWrapper.GetRawConn().(*tlsLayer.Conn)
-			rawWRC = tlsConn.GetRaw(true)
+			//总之只能先用笨拙的穷举情况判断，以后再做优化
+
+			var isTlsDirectly bool
+
+			switch proxy_client.Name() {
+			case "socks5":
+				isTlsDirectly = true
+
+			case "vless_1":
+
+				isTlsDirectly = true
+
+			}
+
+			if isTlsDirectly {
+				tlsConn := wrc.(tlsLayer.Conn)
+				rawWRC = tlsConn.GetRaw(true)
+			} else {
+				wrcWrapper := wrc.(netLayer.ConnWrapper)
+				tlsConn := wrcWrapper.Upstream().(tlsLayer.Conn)
+				rawWRC = tlsConn.GetRaw(true)
+			}
 
 		} else {
 			rawWRC = wrc.(*net.TCPConn) //因为是direct
@@ -317,6 +338,9 @@ func tryTlsLazyRawRelay(connid uint32, useSecureMethod bool, proxy_client proxy.
 				num, e1 := rawWRC.ReadFrom(wlccc_raw)
 				log.Printf("SpliceRead R方向 传完，%v , 长度: %d\n", e1, num)
 			} else {
+				if ce := utils.CanLogDebug("Tls lazy ok1"); ce != nil {
+					ce.Write(zap.Uint32("id", connid))
+				}
 				rawWRC.ReadFrom(wlccc_raw)
 			}
 
@@ -421,6 +445,9 @@ func tryTlsLazyRawRelay(connid uint32, useSecureMethod bool, proxy_client proxy.
 	if isgood2 {
 		if tlsLayer.PDD {
 			log.Printf("成功SpliceRead W方向,准备 直连对拷\n")
+		}
+		if ce := utils.CanLogDebug("Tls lazy ok2"); ce != nil {
+			ce.Write(zap.Uint32("id", connid))
 		}
 
 		if tlslazy_willuseSystemCall {

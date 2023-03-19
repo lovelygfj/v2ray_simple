@@ -10,57 +10,67 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-//从一个透明代理tcp连接中读取到实际地址
+// 从一个透明代理tcp连接中读取到实际地址
 func HandshakeTCP(tcpConn *net.TCPConn) netLayer.Addr {
 	targetTCPAddr := tcpConn.LocalAddr().(*net.TCPAddr)
 
 	return netLayer.Addr{
-		IP:   targetTCPAddr.IP,
-		Port: targetTCPAddr.Port,
+		IP:      targetTCPAddr.IP,
+		Port:    targetTCPAddr.Port,
+		Network: "tcp",
 	}
 
 }
 
-var udpMsgConnMap = make(map[netLayer.HashableAddr]*MsgConn)
+func (m *Machine) removeUDPByHash(hash netLayer.HashableAddr) {
+	m.Lock()
+	delete(m.udpMsgConnMap, hash)
+	m.Unlock()
+}
 
-//从一个透明代理udp连接中读取到实际地址，并返回 *MsgConn
-func HandshakeUDP(underlay *net.UDPConn) (*MsgConn, netLayer.Addr, error) {
-	bs := utils.GetPacket()
-	n, src, dst, err := ReadFromUDP(underlay, bs)
-	if err != nil {
-		return nil, netLayer.Addr{}, err
-	}
-	ad := netLayer.NewAddrFromUDPAddr(src)
-	hash := ad.GetHashable()
-	conn, found := udpMsgConnMap[hash]
-	if !found {
-		conn = &MsgConn{
-			ourSrcAddr: src,
-			readChan:   make(chan netLayer.AddrData, 5),
-			closeChan:  make(chan struct{}),
+// 从一个透明代理udp连接中读取到实际地址，并返回 *MsgConn
+func (m *Machine) HandshakeUDP(underlay *net.UDPConn) (*MsgConn, netLayer.Addr, error) {
+
+	for {
+		bs := utils.GetPacket()
+		n, src, dst, err := ReadFromUDP(underlay, bs)
+		if err != nil {
+			return nil, netLayer.Addr{}, err
 		}
-		conn.InitEasyDeadline()
+		ad := netLayer.NewAddrFromUDPAddr(src)
+		hash := ad.GetHashable()
 
-		udpMsgConnMap[hash] = conn
+		m.RLock()
+		conn, found := m.udpMsgConnMap[hash]
+		m.RUnlock()
+
+		if !found {
+			conn = &MsgConn{
+				ourSrcAddr:    src,
+				readChan:      make(chan netLayer.AddrData, 5),
+				closeChan:     make(chan struct{}),
+				parentMachine: m,
+				hash:          hash,
+			}
+			conn.InitEasyDeadline()
+
+			m.Lock()
+			m.udpMsgConnMap[hash] = conn
+			m.Unlock()
+
+		}
+
+		destAddr := netLayer.NewAddrFromUDPAddr(dst)
+
+		conn.readChan <- netLayer.AddrData{Data: bs[:n], Addr: destAddr}
+
+		if !found {
+			return conn, destAddr, nil
+
+		}
 
 	}
 
-	conn.readChan <- netLayer.AddrData{Data: bs[:n], Addr: netLayer.NewAddrFromUDPAddr(dst)}
-
-	return conn, netLayer.NewAddrFromUDPAddr(dst), nil
-}
-
-//implements netLayer.MsgConn
-type MsgConn struct {
-	netLayer.EasyDeadline
-
-	ourSrcAddr *net.UDPAddr
-
-	readChan chan netLayer.AddrData
-
-	closeChan chan struct{}
-
-	fullcone bool
 }
 
 func (mc *MsgConn) Close() error {
@@ -68,12 +78,14 @@ func (mc *MsgConn) Close() error {
 	case <-mc.closeChan:
 	default:
 		close(mc.closeChan)
+		mc.parentMachine.removeUDPByHash(mc.hash)
+
 	}
 	return nil
 }
 
 func (mc *MsgConn) CloseConnWithRaddr(raddr netLayer.Addr) error {
-	return nil
+	return mc.Close()
 }
 
 func (mc *MsgConn) Fullcone() bool {
@@ -84,7 +96,7 @@ func (mc *MsgConn) SetFullcone(f bool) {
 	mc.fullcone = f
 }
 
-func (mc *MsgConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
+func (mc *MsgConn) ReadMsg() ([]byte, netLayer.Addr, error) {
 
 	must_timeoutChan := time.After(netLayer.UDP_timeout)
 	select {
@@ -100,12 +112,12 @@ func (mc *MsgConn) ReadMsgFrom() ([]byte, netLayer.Addr, error) {
 }
 
 // 通过透明代理 写回 客户端
-func (mc *MsgConn) WriteMsgTo(p []byte, addr netLayer.Addr) error {
+func (mc *MsgConn) WriteMsg(p []byte, peerAddr netLayer.Addr) error {
 	back, err := DialUDP(
 		"udp",
 		&net.UDPAddr{
-			IP:   addr.IP,
-			Port: addr.Port,
+			IP:   peerAddr.IP,
+			Port: peerAddr.Port,
 		},
 		mc.ourSrcAddr,
 	)

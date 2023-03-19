@@ -1,0 +1,20 @@
+[[listen]]
+protocol = "socks5"
+host = "127.0.0.1"
+port = 10800
+
+
+[[dial]]
+protocol = "shadowsocks"
+
+host = "127.0.0.1"
+port = 4434
+
+uuid = "method:AES-128-GCM\npass:iloveverysimple"   
+
+# 之所以uuid这么写，完全是shadowsocks的规范所定义的，它要求 服务端和客户端所指定的 method必须匹配；
+# 从逻辑上讲，这个method也加入了鉴权。类似的配置还可以参考 socks5.toml
+
+#encrypt_algo = "AES-128-GCM"  # chacha20-ietf-poly1305,AES-128-GCM, AES-256-GCM, 大小写均可；一般应该是 aes 更快， 如果 encrypt_algo 给出，会覆盖 uuid中的 method 部分
+
+#network = "dual"   #ss同时使用tcp和udp分别传输tcp和udp数据，属于双栈, 如果设成tcp，则不会传输udp。

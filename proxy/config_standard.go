@@ -1,46 +1,26 @@
 package proxy
 
 import (
-	"errors"
-	"io/ioutil"
-	"log"
-	"os"
-	"path/filepath"
-
 	"github.com/BurntSushi/toml"
 	"github.com/e1732a364fed/v2ray_simple/httpLayer"
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-//配置文件格式
+// 配置文件格式
 const (
-	SimpleMode = iota
+	UrlMode = iota
 	StandardMode
 	V2rayCompatibleMode
 
 	ErrStrNoListenUrl = "no listen URL provided"
 )
 
-type AppConf struct {
-	LogLevel          *int    `toml:"loglevel"` //需要为指针, 否则无法判断0到底是未给出的默认值还是 显式声明的0
-	LogFile           *string `toml:"logfile"`
-	DefaultUUID       string  `toml:"default_uuid"`
-	MyCountryISO_3166 string  `toml:"mycountry" json:"mycountry"` //加了mycountry后，就会自动按照geoip分流,也会对顶级域名进行国别分流
-
-	NoReadV bool `toml:"noreadv"`
-
-	AdminPass string `toml:"admin_pass"` //用于apiServer等情况
-
-	UDP_timeout *int `toml:"udp_timeout"`
-}
-
-//标准配置，使用toml格式。
+// 标准配置，使用toml格式。
 // toml：https://toml.io/cn/
 //
 // English: https://toml.io/en/
 type StandardConf struct {
-	App     *AppConf          `toml:"app"`
 	DnsConf *netLayer.DnsConf `toml:"dns"`
 
 	Listen []*ListenConf `toml:"listen"`
@@ -50,65 +30,29 @@ type StandardConf struct {
 	Fallbacks []*httpLayer.FallbackConf `toml:"fallback"`
 }
 
-func LoadTomlConfStr(str string) (c StandardConf, err error) {
+// 第一种情况是 将一些较长的配置项 以较短的缩写 作为同义词. 然后代码读取时 只使用短的词.
+// 第二种情况是 为了向后兼容，将已经不存在的配置替换为新配置
+var StandardConfSynonyms = [][2]string{
+	{"advancedLayer", "adv"},
+	{"tls_rejectUnknownSni", "rejectUnknownSni"},
+	{"utls = true", `tls_type = "utls"`},
+	{"use_mux = true", "mux = true"},
+}
+
+var StandardConfBytesSynonyms [][2][]byte
+
+func init() {
+	for _, ss := range StandardConfSynonyms {
+
+		StandardConfBytesSynonyms = append(StandardConfBytesSynonyms, [2][]byte{[]byte(ss[0]), []byte(ss[1])})
+	}
+}
+
+// convenient function for loading StandardConf from a string. Calls utils.ReplaceStringsSynonyms(str, StandardConfSynonyms)
+func LoadStandardConfFromTomlStr(str string) (c StandardConf, err error) {
+
+	str = utils.ReplaceStringsSynonyms(str, StandardConfSynonyms)
+
 	_, err = toml.Decode(str, &c)
-	return
-}
-
-func LoadTomlConfFile(fileNamePath string) (StandardConf, error) {
-
-	if cf, err := os.Open(fileNamePath); err == nil {
-		defer cf.Close()
-		bs, _ := ioutil.ReadAll(cf)
-		return LoadTomlConfStr(string(bs))
-	} else {
-		return StandardConf{}, utils.ErrInErr{ErrDesc: "can't open config file", ErrDetail: err}
-	}
-
-}
-
-// 先检查configFileName是否存在，存在就尝试加载文件到 standardConf or simpleConf，否则尝试 listenURL, dialURL 参数.
-// 若 返回的是 simpleConf, 则还可能返回 mainFallback.
-func LoadConfig(configFileName, listenURL, dialURL string, jsonMode int) (standardConf StandardConf, simpleConf SimpleConf, confMode int, mainFallback *httpLayer.ClassicFallback, err error) {
-
-	fpath := utils.GetFilePath(configFileName)
-	if fpath != "" {
-
-		ext := filepath.Ext(fpath)
-		if ext == ".toml" {
-			standardConf, err = LoadTomlConfFile(fpath)
-			if err != nil {
-
-				log.Printf("can not load standard config file: %v, \n", err)
-				goto url
-
-			}
-
-			confMode = StandardMode
-
-		} else {
-
-			confMode = SimpleMode
-			simpleConf, mainFallback, err = loadSimpleConf_byFile(fpath)
-
-		}
-
-		return
-
-	}
-url:
-	if listenURL != "" {
-		log.Printf("trying listenURL and dialURL \n")
-
-		confMode = SimpleMode
-		simpleConf, err = loadSimpleConf_byUrl(listenURL, dialURL)
-	} else {
-
-		log.Println(ErrStrNoListenUrl)
-		err = errors.New(ErrStrNoListenUrl)
-		confMode = -1
-		return
-	}
-
 	return
 }

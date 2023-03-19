@@ -10,9 +10,9 @@ uuid = "a684455c-b14f-11ea-bf0d-42010aaa0003"
 host = "/dev/shm/ws.sock"   # 文件不需要实际存在，只需要 该目录存在，且 vs具有对应目录的权限
 network = "unix"    # 别忘了标network 为 unix (unix domain socket 的 golang的简称)
 insecure = true
-utls = true
+tls_type = "utls"
 
-advancedLayer = "ws"
+adv = "ws"
 path = "/ohmygod_verysimple_is_very_simple"
 early = true   # websocket early data 功能 （即0-rtt）
 #use_mux = true  # 只需要客户端指明 use_mux 即可开启mux, 服务端自动适配.

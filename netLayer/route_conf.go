@@ -13,15 +13,15 @@ import (
 )
 
 type RuleConf struct {
-	DialTag any `toml:"toTag"`
+	DialTag any `toml:"toTag" json:"toTag"`
 
-	InTags []string `toml:"fromTag"`
-	Users  []string `toml:"user"`
+	InTags []string `toml:"fromTag" json:"fromTag"`
+	Users  []string `toml:"user" json:"user"`
 
-	Countries []string `toml:"country"` // 如果类似 !CN, 则意味着专门匹配不为CN 的国家（目前还未实现）
-	IPs       []string `toml:"ip"`
-	Domains   []string `toml:"domain"`
-	Network   []string `toml:"network"`
+	Countries []string `toml:"country" json:"country"` // 如果类似 !CN, 则意味着专门匹配不为CN 的国家（目前还未实现）
+	IPs       []string `toml:"ip" json:"ip"`
+	Domains   []string `toml:"domain" json:"domain"`
+	Network   []string `toml:"network" json:"network"`
 }
 
 func (policy *RoutePolicy) LoadRulesForRoutePolicy(rules []*RuleConf) {
@@ -146,9 +146,13 @@ func LoadRuleForRouteSet(rule *RuleConf) (rs *RouteSet) {
 		}
 	}
 
-	for _, ns := range rule.Network {
-		tp := StrToTransportProtocol(ns)
-		rs.AllowedTransportLayerProtocols |= tp
+	if len(rule.Network) > 0 {
+		rs.AllowedTransportLayerProtocols = 0 //因为 NewFullRouteSet 默认会同时允许 tcp和udp，所以在自定义网络层规则时，我们不用默认值。
+
+		for _, netStr := range rule.Network {
+			tp := StrToTransportProtocol(netStr)
+			rs.AllowedTransportLayerProtocols |= tp
+		}
 	}
 
 	return rs

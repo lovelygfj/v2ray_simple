@@ -1,10 +1,12 @@
 package socks5_test
 
 import (
+	"math/rand"
 	"net"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
 	"github.com/e1732a364fed/v2ray_simple/proxy"
@@ -19,6 +21,8 @@ func TestUDP(t *testing.T) {
 	utils.InitLog("")
 
 	s := socks5.NewServer()
+
+	rand.Seed(time.Now().UnixNano())
 
 	//建立socks5服务并监听，这里仅用于 udp associate 握手
 	sAddrStr := netLayer.GetRandLocalAddr(true, true)
@@ -53,7 +57,7 @@ func TestUDP(t *testing.T) {
 				for {
 					t.Log("socks5 server start read udp channel")
 
-					bs, addr, err := wlc.ReadMsgFrom()
+					bs, addr, err := wlc.ReadMsg()
 					if err != nil {
 						t.Log("socks5 server read udp channel err,", err)
 
@@ -67,17 +71,17 @@ func TestUDP(t *testing.T) {
 						t.Fail()
 						return
 					}
-					err = msgConn.WriteMsgTo(bs, addr)
+					err = msgConn.WriteMsg(bs, addr)
 					if err != nil {
 						t.Log("socks5 server Write To direct failed,", len(bs), err)
 					}
 					go func() {
 						for {
-							rbs, raddr, err := msgConn.ReadMsgFrom()
+							rbs, raddr, err := msgConn.ReadMsg()
 							if err != nil {
 								break
 							}
-							wlc.WriteMsgTo(rbs, raddr)
+							wlc.WriteMsg(rbs, raddr)
 						}
 					}()
 				}

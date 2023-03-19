@@ -1,6 +1,8 @@
 package httpLayer
 
 import (
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -8,49 +10,127 @@ import (
 const (
 
 	//符合 nginx返回的时间格式，且符合 golang对时间格式字符串的 "123456"的约定 的字符串。
-	nginx_timeFormatStr = "02 Jan 2006 15:04:05 MST"
+	Nginx_timeFormatStr = "02 Jan 2006 15:04:05 MST"
 
-	// real nginx response, echo xx | nc 127.0.0.1 80 > response
-	Err400response_nginx = "HTTP/1.1 400 Bad Request\r\nServer: nginx/1.21.5\r\nDate: Sat, 02 Jan 2006 15:04:05 MST\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<hr><center>nginx/1.21.5</center>\r\n</body>\r\n</html>\r\n"
+	Nginx400_html = "<html>\r\n<head><title>400 Bad Request</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<hr><center>nginx/1.21.5</center>\r\n</body>\r\n</html>\r\n"
 
-	// real nginx response, curl -iv --raw 127.0.0.1/not_exist_path > response
-	Err404response_nginx = "HTTP/1.1 404 Not Found\r\nServer: nginx/1.21.5\r\nDate: Sat, 02 Jan 2006 15:04:05 MST\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 19\r\nConnection: keep-alive\r\nCache-Control: no-cache, no-store, no-transform, must-revalidate, private, max-age=0\r\nExpires: Thu, 01 Jan 1970 08:00:00 AWST\r\nPragma: no-cache\r\nVary: Origin\r\nX-Content-Type-Options: nosniff\r\n\r\n404 page not found"
+	// real nginx response,to generate it,  echo xx | nc 127.0.0.1 80 > response
+	Err400response_nginx = "HTTP/1.1 400 Bad Request\r\nServer: nginx/1.21.5\r\nDate: Sat, 02 Jan 2006 15:04:05 MST\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + Nginx400_html
 
-	/* real nginx response, set nginx config like:
+	// real nginx response,to generate it,  curl -iv --raw 127.0.0.1/not_exist_path > response
+	Err404response_nginx = "HTTP/1.1 404 Not Found\r\nServer: nginx/1.21.5\r\nDate: Sat, 02 Jan 2006 15:04:05 MST\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 19\r\nConnection: keep-alive\r\nCache-Control: no-cache, no-store, no-transform, must-revalidate, private, max-age=0\r\nExpires: Thu, 01 Jan 1970 08:00:00 AWST\r\nPragma: no-cache\r\nVary: Origin\r\nX-Content-Type-Options: nosniff\r\n\r\n404 page not found\n"
+
+	//nginx应该是可以专门配置一个404页面的，所以没有该页面时，就会返回 404 page not found
+
+	Nginx403_html = "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body bgcolor=\"white\">\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx/1.21.5</center>\r\n</body>\r\n</html>\r\n"
+
+	/* real nginx response, to generate it,  set nginx config like:
 	location / {
 		return 403;
 	}
-
 	*/
-	Err403response_nginx = `HTTP/1.1 403 Forbidden\r\nServer: nginx/1.14.2\r\nDate: Sat, 02 Jan 2006 15:04:05 MST\r\nContent-Type: text/html\r\nContent-Length: 169\r\nConnection: keep-alive\r\n\r\n<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body bgcolor="white">\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx/1.14.2</center>\r\n</body>\r\n</html>\r\n`
+	Err403response_nginx = "HTTP/1.1 403 Forbidden\r\nServer: nginx/1.21.5\r\nDate: Sat, 02 Jan 2006 15:04:05 MST\r\nContent-Type: text/html\r\nContent-Length: 169\r\nConnection: keep-alive\r\n\r\n" + Nginx403_html
 
-	//备注，vim中， "\r" 显示为 ^M, 输入它是用 ctrl + V + M
+	//备注
+	// 1. vim中， "\r" 显示为 ^M, 输入它是用 ctrl + V + M
+	// 2. vim 在显示 末尾 有 \n 的文件 时， 会 直接省略这个 \n
 )
 
-var nginxTimezone = time.FixedZone("GMT", 0)
+var (
+	nginxTimezone = time.FixedZone("GMT", 0)
+
+	bs_Nginx403_html = []byte(Nginx403_html)
+	bs_Nginx400_html = []byte(Nginx400_html)
+)
 
 //Get real a 400 response that looks like it comes from nginx.
-func GetReal400Response() string {
-	return GetRealResponse(Err400response_nginx)
+func GetNginx400Response() string {
+	return GetNginxResponse(Err400response_nginx)
 }
 
 //Get real a 403 response that looks like it comes from nginx.
-func GetReal403Response() string {
-	return GetRealResponse(Err403response_nginx)
+func GetNginx403Response() string {
+	return GetNginxResponse(Err403response_nginx)
 }
 
 //Get real a 404 response that looks like it comes from nginx.
-func GetReal404Response() string {
-	return GetRealResponse(Err404response_nginx)
+func GetNginx404Response() string {
+	return GetNginxResponse(Err404response_nginx)
+}
+
+func GetNginxWeekdayStr(t *time.Time) string {
+	return t.Weekday().String()[:3]
+}
+
+func SetDefaultNginxHeader(rw http.ResponseWriter) {
+	rw.Header().Add("Server", "nginx/1.21.5")
+	t := time.Now().UTC().In(nginxTimezone)
+	tStr := t.Format(Nginx_timeFormatStr)
+	tStr = GetNginxWeekdayStr(&t) + ", " + tStr
+
+	rw.Header().Add("Date", tStr)
 }
 
 //Get real a response that looks like it comes from nginx.
-func GetRealResponse(template string) string {
+func GetNginxResponse(template string) string {
 	t := time.Now().UTC().In(nginxTimezone)
 
-	tStr := t.Format(nginx_timeFormatStr)
-	str := strings.Replace(template, nginx_timeFormatStr, tStr, 1)
-	str = strings.Replace(str, "Sat", t.Weekday().String()[:3], 1)
+	tStr := t.Format(Nginx_timeFormatStr)
+	str := strings.Replace(template, Nginx_timeFormatStr, tStr, 1)
+	str = strings.Replace(str, "Sat", GetNginxWeekdayStr(&t), 1)
 
 	return str
+}
+
+//mimic GetNginx400Response()
+func SetNginx400Response(rw http.ResponseWriter) {
+	SetDefaultNginxHeader(rw)
+
+	rw.Header().Add("Content-Type", "text/html")
+	rw.Header().Add("Connection", "close")
+
+	//真实nginx 400响应里不含 Content-Length
+	// 情况是这样的： 若 Connection 是 keep-alive, 则 有 Content-Length；
+	// 若 Connection 是 Close，则 没有 Content-Length；
+
+	rw.WriteHeader(http.StatusBadRequest)
+
+	rw.Write(bs_Nginx400_html)
+	if flusher, ok := rw.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+}
+
+func SetNginx403Response(rw http.ResponseWriter) {
+	SetDefaultNginxHeader(rw)
+
+	rw.Header().Add("Content-Type", "text/html")
+	rw.Header().Add("Connection", "keep-alive")
+
+	rw.Header().Add("Content-Length", strconv.Itoa(len(bs_Nginx403_html)))
+
+	rw.WriteHeader(http.StatusForbidden)
+
+	rw.Write(bs_Nginx403_html)
+	if flusher, ok := rw.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+}
+
+//implements netLayer.RejectConn
+type RejectConn struct {
+	http.ResponseWriter
+}
+
+func (RejectConn) RejectBehaviorDefined() bool {
+
+	return true
+}
+
+//call SetNginx403Response
+func (rc RejectConn) Reject() {
+	SetNginx403Response(rc.ResponseWriter)
+
 }

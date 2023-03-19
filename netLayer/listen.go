@@ -64,22 +64,6 @@ func loopAccept(listener net.Listener, xver int, acceptFunc func(net.Conn)) {
 	}
 }
 
-/*
-func loopAcceptUDP(uc net.UDPConn, acceptFunc func([]byte, *net.UDPAddr)) {
-	for {
-		p := utils.GetPacket()
-		n, addr, err := uc.ReadFromUDP(p)
-		if err != nil {
-			if ce := utils.CanLogWarn("loopAcceptUDP failed to accept"); ce != nil {
-				ce.Write(zap.Error(err))
-			}
-			break
-		}
-		go acceptFunc(p[:n], addr)
-	}
-}
-*/
-
 // ListenAndAccept 试图监听 tcp, udp 和 unix domain socket 这三种传输层协议.
 //
 // 非阻塞，在自己的goroutine中监听.
@@ -90,8 +74,10 @@ func ListenAndAccept(network, addr string, sockopt *Sockopt, xver int, acceptFun
 	if network == "" {
 		network = "tcp"
 	}
-	switch network {
-	case "tcp", "tcp4", "tcp6":
+	p := StrToTransportProtocol(network)
+
+	switch p {
+	case TCP:
 		var tcplistener *net.TCPListener
 
 		var ta *net.TCPAddr
@@ -113,7 +99,7 @@ func ListenAndAccept(network, addr string, sockopt *Sockopt, xver int, acceptFun
 
 		listener = tcplistener
 
-	case "udp", "udp4", "udp6":
+	case UDP:
 
 		//udp 的透明代理等设置sockopt的情况并不使用本函数监听, 而是使用 ListenUDP_withOpt.
 
@@ -129,9 +115,9 @@ func ListenAndAccept(network, addr string, sockopt *Sockopt, xver int, acceptFun
 		}
 		go loopAccept(listener, xver, acceptFunc)
 
-	case "unix":
+	case UNIX:
 		// 参考 https://eli.thegreenplace.net/2019/unix-domain-sockets-in-go/
-		//监听 unix domain socket后，就会自动创建 相应文件;
+		//监听 unix domain socket 后，就会自动创建 相应文件;
 		// 而且程序退出后，该文件不会被删除
 		//  而且再次启动后如果遇到了这个文件，就会报错，就像tcp端口已经被监听 的错误一样:
 		// “bind: address already in use”
@@ -169,6 +155,16 @@ func ListenAndAccept(network, addr string, sockopt *Sockopt, xver int, acceptFun
 
 		if err != nil {
 			return
+		}
+
+		if p == UNIX {
+			eu := os.Chmod(addr, 0666)
+			if eu != nil {
+				if ce := utils.CanLogWarn("unix domain socket file can't be set to 0666"); ce != nil {
+					ce.Write(zap.String("deleting", addr))
+				}
+			}
+
 		}
 
 		go loopAccept(listener, xver, acceptFunc)

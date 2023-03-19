@@ -60,14 +60,14 @@ var (
 		MaxIdleTimeout:        common_maxidletimeout,
 		MaxIncomingStreams:    Default_Server_maxStreamCountInOneConn,
 		MaxIncomingUniStreams: -1,
-		KeepAlive:             true,
+		KeepAlivePeriod:       time.Minute,
 	}
 
 	common_DialConfig = quic.Config{
 		ConnectionIDLength:   common_ConnectionIDLength,
 		HandshakeIdleTimeout: common_HandshakeIdleTimeout,
 		MaxIdleTimeout:       common_maxidletimeout,
-		KeepAlive:            true,
+		KeepAlivePeriod:      time.Minute,
 	}
 )
 
@@ -85,7 +85,7 @@ func CloseConn(conn any) {
 	if ok && qc != nil {
 		qc.CloseWithError(0, "")
 	} else {
-		if ce := utils.CanLogErr("quic.CloseConn called with illegal parameter"); ce != nil {
+		if ce := utils.CanLogErr("Quic.CloseConn called with illegal parameter"); ce != nil {
 			ce.Write(zap.String("type", reflect.TypeOf(conn).String()), zap.Any("value", conn))
 		}
 
@@ -142,7 +142,7 @@ func (Creator) NewClientFromConf(conf *advLayer.Conf) (advLayer.Client, error) {
 
 	var tConf tls.Config
 	if conf.TlsConf != nil {
-		tConf = *conf.TlsConf
+		tConf = *conf.TlsConf //tls.Config是包含RWMutex的，正常是不宜直接复制的; 不过这个Config我们只用在quic包中，而该包内部是会直接调用Clone的，并不会直接使用我们的Config，所以没关系。
 
 	}
 	tConf.NextProtos = alpn
@@ -185,16 +185,17 @@ func (Creator) NewServerFromConf(conf *advLayer.Conf) (advLayer.Server, error) {
 	}, nil
 }
 
+//从配置map中读取更多配置信息。一般在程序刚运行时调用。为了保证信息绝对能输出，就是用了 log包来以防万一。
 func getExtra(extra map[string]any) (useHysteria, hysteria_manual bool,
 	maxbyteCount int,
 	maxStreamsInOneConn int64) {
 
 	if thing := extra["maxStreamsInOneConn"]; thing != nil {
-		if count, ok := thing.(int64); ok && count > 0 {
-			if ce := utils.CanLogInfo("quic max Streams In One Conn"); ce != nil {
+		if count, ok := utils.AnyToInt64(thing); ok && count > 0 {
+			if ce := utils.CanLogInfo("Quic max Streams In One Conn"); ce != nil {
 				ce.Write(zap.Int("count,", int(count)))
 			} else {
-				log.Println("quic maxStreamsInOneConn,", count)
+				log.Println("Quic maxStreamsInOneConn,", count)
 
 			}
 			maxStreamsInOneConn = count
@@ -208,7 +209,7 @@ func getExtra(extra map[string]any) (useHysteria, hysteria_manual bool,
 			useHysteria = true
 
 			if thing := extra["mbps"]; thing != nil {
-				if mbps, ok := thing.(int64); ok && mbps > 1 {
+				if mbps, ok := utils.AnyToInt64(thing); ok && mbps > 1 {
 					maxbyteCount = int(mbps) * 1024 * 1024 / 8
 				}
 			} else {
@@ -223,7 +224,7 @@ func getExtra(extra map[string]any) (useHysteria, hysteria_manual bool,
 			}
 
 			if thing := extra["hy_manual"]; thing != nil {
-				if ismanual, ok := thing.(bool); ok {
+				if ismanual, ok := utils.AnyToBool(thing); ok {
 					hysteria_manual = ismanual
 					if ismanual {
 
@@ -234,7 +235,7 @@ func getExtra(extra map[string]any) (useHysteria, hysteria_manual bool,
 						}
 
 						if thing := extra["hy_manual_initial_rate"]; thing != nil {
-							if initRate, ok := thing.(float64); ok {
+							if initRate, ok := utils.AnyToFloat64(thing); ok {
 
 								if rateOk(initRate) == 0 {
 									TheCustomRate = initRate

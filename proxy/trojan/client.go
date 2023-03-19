@@ -18,20 +18,26 @@ func init() {
 
 //作为对照，可以参考 https://github.com/p4gefau1t/trojan-go/blob/master/tunnel/trojan/client.go
 
-type ClientCreator struct{}
+type ClientCreator struct{ proxy.CreatorCommonStruct }
 
-func (ClientCreator) NewClientFromURL(url *url.URL) (proxy.Client, error) {
-	uuidStr := url.User.Username()
-	c := Client{
-		User: NewUserByPlainTextPassword(uuidStr),
+func (ClientCreator) URLToDialConf(url *url.URL, dc *proxy.DialConf, format int) (*proxy.DialConf, error) {
+	switch format {
+	case proxy.UrlStandardFormat:
+		if dc == nil {
+			dc = &proxy.DialConf{}
+			uuidStr := url.User.Username()
+			dc.UUID = uuidStr
+
+		}
+		return dc, nil
+	default:
+		return nil, utils.ErrUnImplemented
 	}
-
-	return &c, nil
 }
 
 func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
 
-	uuidStr := dc.Uuid
+	uuidStr := dc.UUID
 
 	c := Client{
 		use_mux: dc.Mux,
@@ -47,6 +53,9 @@ type Client struct {
 	use_mux bool
 }
 
+func (*Client) GetCreator() proxy.ClientCreator {
+	return ClientCreator{}
+}
 func (*Client) Name() string {
 	return Name
 }
@@ -68,13 +77,16 @@ func (c *Client) GetUser() utils.User {
 func WriteAddrToBuf(target netLayer.Addr, buf *bytes.Buffer) {
 	if len(target.IP) > 0 {
 		if ip4 := target.IP.To4(); ip4 == nil {
-			buf.WriteByte(netLayer.AtypIP6)
+
+			buf.WriteByte(ATypIP6)
 			buf.Write(target.IP)
 		} else {
-			buf.WriteByte(netLayer.AtypIP4)
+
+			buf.WriteByte(ATypIP4)
 			buf.Write(ip4)
 		}
 	} else if l := len(target.Name); l > 0 {
+
 		buf.WriteByte(ATypDomain)
 		buf.WriteByte(byte(l))
 		buf.WriteString(target.Name)
@@ -117,18 +129,24 @@ func (c *Client) Handshake(underlay net.Conn, firstPayload []byte, target netLay
 		return underlay, nil
 	} else {
 		// 发现直接返回 underlay 反倒无法利用readv, 所以还是统一用包装过的. 目前利用readv是可以加速的.
-		return &UserTCPConn{
+		uc := &UserTCPConn{
 			Conn:            underlay,
 			User:            c.User,
 			underlayIsBasic: netLayer.IsBasicConn(underlay),
-		}, nil
+		}
+
+		if mw, ok := underlay.(utils.MultiWriter); ok {
+			uc.mw = mw
+		}
+
+		return uc, nil
 	}
 
 }
 
 func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, target netLayer.Addr) (netLayer.MsgConn, error) {
 	if target.Port <= 0 {
-		return nil, errors.New("trojan Client EstablishUDPChannel failed, target port invalid")
+		return nil, utils.ErrInErr{ErrDesc: "trojan Client EstablishUDPChannel failed, target port invalid", Data: target}
 
 	}
 	buf := utils.GetBuf()
@@ -143,6 +161,6 @@ func (c *Client) EstablishUDPChannel(underlay net.Conn, firstPayload []byte, tar
 	if len(firstPayload) == 0 {
 		return uc, nil
 	} else {
-		return uc, uc.WriteMsgTo(firstPayload, target)
+		return uc, uc.WriteMsg(firstPayload, target)
 	}
 }

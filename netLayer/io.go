@@ -5,11 +5,10 @@ import (
 	"net"
 	"os"
 	"sync"
-
-	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-//选择性从 OptionalReader读取, 直到 RemainFirstBufLen 小于等于0 为止；
+// 选择性从 OptionalReader读取, 直到 RemainFirstBufLen 小于等于0 为止；
+// 该结构 mimic utils.ReadWrapper
 type ReadWrapper struct {
 	net.Conn
 	OptionalReader    io.Reader
@@ -30,20 +29,10 @@ func (rw *ReadWrapper) Read(p []byte) (n int, err error) {
 
 }
 
-func (rw *ReadWrapper) WriteBuffers(buffers [][]byte) (int64, error) {
-	bigbs, dup := utils.MergeBuffers(buffers)
-	n, e := rw.Write(bigbs)
-	if dup {
-		utils.PutPacket(bigbs)
-	}
-	return int64(n), e
-
-}
-
-//一个自定义的由多个组件组成的实现 net.Conn 的结构
+// 一个自定义的由多个组件组成的实现 net.Conn 的结构, 也通过设置 Rejecter 实现 RejectConn
 type IOWrapper struct {
 	EasyNetAddresser
-	EasyDeadline
+	EasyDeadline //无需再调用 InitEasyDeadline，内部已经处理好了。
 
 	io.Reader //不可为nil
 	io.Writer //不可为nil
@@ -56,6 +45,8 @@ type IOWrapper struct {
 	deadlineInited bool
 
 	closeOnce, firstWriteOnce sync.Once
+
+	Rejecter RejectConn
 }
 
 func (iw *IOWrapper) Read(p []byte) (int, error) {
@@ -109,4 +100,14 @@ func (iw *IOWrapper) Close() error {
 
 	}
 	return nil
+}
+
+func (iw *IOWrapper) RejectBehaviorDefined() bool {
+
+	return iw.Rejecter != nil && iw.Rejecter.RejectBehaviorDefined()
+}
+func (iw *IOWrapper) Reject() {
+	if iw.Rejecter != nil {
+		iw.Rejecter.Reject()
+	}
 }

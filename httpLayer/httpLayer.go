@@ -27,7 +27,9 @@ package httpLayer
 import (
 	"bytes"
 	"io"
+	"net"
 	"strings"
+	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/utils"
 
@@ -35,9 +37,9 @@ import (
 	"net/http/httptest"
 )
 
-const Err403response = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nCache-Control: max-age=3600, public\r\nContent-Length: 0\r\n\r\n"
-
 const (
+	Err403response = "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nCache-Control: max-age=3600, public\r\nContent-Length: 0\r\n\r\n"
+
 	H11_Str = "http/1.1"
 	H2_Str  = "h2"
 
@@ -49,6 +51,8 @@ const (
 	HeaderENDING = CRLF + CRLF
 
 	//我们不使用v2ray的8k的最大header长度限制，因为这反倒会探测出特殊性。http标准是最大1MB。
+
+	XForwardStr = "X-Forwarded-For"
 )
 
 var (
@@ -114,8 +118,10 @@ type H1RequestParser struct {
 	Headers         []RawHeader
 }
 
-// 尝试读取数据并解析HTTP请求, 解析道道 数据会存入 RequestParser 结构中.
+// 尝试读取数据并解析HTTP请求, 解析的 数据会存入 RequestParser 结构中.
 //如果读取错误,会返回该错误; 如果读到的不是HTTP请求，返回 的err 的 errors.Is(err,ErrNotHTTP_Request) == true;
+//
+// 该函数有个小问题,就是如果一次Read是短Read（可能是网络原因），没读完整个http头部，则仍然会认为是错误
 func (rhr *H1RequestParser) ReadAndParse(r io.Reader) error {
 	bs := utils.GetPacket()
 
@@ -130,6 +136,51 @@ func (rhr *H1RequestParser) ReadAndParse(r io.Reader) error {
 	rhr.Version, rhr.Method, rhr.Path, rhr.Headers, rhr.Failreason = ParseH1Request(data, false)
 	if rhr.Failreason != 0 {
 		return utils.ErrInErr{ErrDesc: "httpLayer ReadAndParse failed", ErrDetail: ErrNotHTTP_Request, Data: rhr.Failreason}
+	}
+	return nil
+}
+
+//第一次没读完后，再读一遍
+func (rhr *H1RequestParser) ReadAndParse_2(r net.Conn) error {
+	bs := utils.GetPacket()
+
+	n, e := r.Read(bs)
+	if e != nil {
+		return e
+	}
+	data := bs[:n]
+	buf := bytes.NewBuffer(data)
+	rhr.WholeRequestBuf = buf
+
+	rhr.Version, rhr.Method, rhr.Path, rhr.Headers, rhr.Failreason = ParseH1Request(data, false)
+	if rhr.Failreason == Fail_no_endMark {
+
+		r.SetReadDeadline(time.Now().Add(time.Millisecond * 200))
+		n2, e2 := r.Read(bs[n:])
+		r.SetReadDeadline(time.Time{})
+
+		if e2 != nil && n2 <= 0 {
+
+			return utils.ErrInErr{ErrDesc: "httpLayer ReadAndParse failed", ErrDetail: ErrNotHTTP_Request, Data: []interface{}{rhr.Failreason, e2}}
+
+		} else {
+
+			data2 := bs[:n+rhr.WholeRequestBuf.Len()]
+			buf2 := bytes.NewBuffer(data2)
+			rhr.WholeRequestBuf = buf2
+
+			rhr.Version, rhr.Method, rhr.Path, rhr.Headers, rhr.Failreason = ParseH1Request(buf2.Bytes(), false)
+
+			if rhr.Failreason != 0 {
+				return utils.ErrInErr{ErrDesc: "httpLayer ReadAndParse failed", ErrDetail: ErrNotHTTP_Request, Data: rhr.Failreason}
+
+			}
+
+		}
+
+	} else if rhr.Failreason != 0 {
+		return utils.ErrInErr{ErrDesc: "httpLayer ReadAndParse failed", ErrDetail: ErrNotHTTP_Request, Data: rhr.Failreason}
+
 	}
 	return nil
 }

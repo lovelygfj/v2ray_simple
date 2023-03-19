@@ -1,0 +1,154 @@
+# tun
+
+# 你要配置好路由表才能让tun正常使用。 
+# 路由表不是那么好配置，见最下方指导
+
+# 注意，因为我们完全使用 xjasonlyu/tun2socks 的方案，所以 如果你不使用 auto_route，那么
+# 你就要在运行vs之前先手动根据最下方指导 来建立tun设备。如果你使用了auto_route功能，则无须操作。
+
+###############################################################
+
+[[listen]]
+protocol = "tun"
+
+# host = "mydev1"       # 使用 host 配置作为 tun device name, 若不给出, vs会自动分配一个名称
+# ip = "10.1.0.20"      # 使用 ip 配置作为 gateway 的ip , 若不给出，默认为 10.1.0.20
+
+
+# 使用 extra.tun_selfip 作为 tun向外拨号的ip, 若不给出, 默认为 10.1.0.10 （windows上不配置该项）
+
+# 如果 extra.tun_auto_route 给出，vs_gui会试图自动配置路由表. 目前的自动配置逻辑 完全仿照上面的路由配置指导。
+
+# 此时必须通过 tun_auto_route_direct_list 额外给出需要 直连的ip列表, 比如你的 代理服务器的ip地址 (替换掉127.0.0.1); 
+
+# 这是为了防回环。
+
+# 不过也可以不用配置direct_list, 而是直接用vs的 bindToDevice功能 给dial绑定自己拨号网卡, 这就可以轻松防回环了。
+
+extra.tun_auto_route = true
+#extra.tun_auto_route_direct_list = [ "127.0.0.1" ]
+
+# extra.tun_auto_route_manual = true # 若这项开启，则生成路由命令但不执行，由你自行拷贝到终端并执行。
+
+# extra.tun_dns = "1.1.1.1" 
+
+# 若auto_route开启，在 extra.tun_dns 给出你的dns地址后，vs会自动帮你 配置tun设备(win)或者实际网卡(macOS)的dns目标地址。
+# 如果不配置这一项，则会因为tun默认不路由本地ip地址，而dns默认设的都是本地的路由器ip地址，导致使用了默认的被污染的dns。
+
+
+
+[[dial]]
+protocol = "vlesss"
+uuid = "a684455c-b14f-11ea-bf0d-42010aaa0003"
+host = "127.0.0.1"
+port = 4433
+version = 0
+insecure = true
+utls = true
+
+# sockopt.device = "eth32423"   
+
+# 上面的一行配置是 bindToDevice功能，可以指定 某一个网卡 来监听 或者拨号, 
+#  这样就不用配置listen中tun的 tun_auto_route_direct_list了
+# 之所以注释掉，是因为每个人的deivce名称可能都不一样，需要自行确认, 
+
+# windows 上可能为 WLAN / Ethernet
+# mac 上可能为 en0
+
+# sockopt.device = "WLAN"   
+# sockopt.device = "Ethernet"   
+
+
+
+###############################################################
+
+# 对于小白来说，下面的指导太过于高级，难以看懂，因此对于小白来说推荐全自动化的方案，跳过这一大段内容
+
+# 需要管理员权限(sudo)运行vs_gui 才能自动修改路由表 或者创建tun设备
+
+# windows上需要下载 wintun.dll 到vs可执行文件旁边, https://www.wintun.net/builds/wintun-0.14.1.zip
+# 运行 vs加 -d 参数 即可自动下载该dll
+
+###############################################################
+
+# 下面给出macos上的路由表配置指导
+
+# 首先删除默认路由，然后将路由指向 utun3 (用户自己运行的到的名称可能不同)
+# 最后将自己的服务器的ip (我们的例子是 vlesss 的 127.0.0.1，请你改成实际服务器ip) 的路由指向原来的 路由器地址
+
+# sudo route delete -host default
+# sudo route add default -interface utun3
+# sudo route add -host 127.0.0.1 192.168.1.1
+
+# 关闭vs后，要将原来的路由添回。不会的话，重启可以复原。
+
+# sudo route delete -host default
+# sudo route add default 192.168.1.1
+
+# 这个方案只适用于 不直连，全经过代理的情况。如果要分流直连，则需要更高级的 路由方案才行，否则会导致本地回环
+
+# 你还可以参考 https://github.com/yangchuansheng/love-gfw/blob/master/docs/gotun2socks-macos.md
+
+###############################################################
+
+# 下面给出windows上的路由表配置指导
+
+# route delete 0.0.0.0 mask 0.0.0.0
+# route add 0.0.0.0 mask 0.0.0.0 10.1.0.20 metric 6
+
+# 移除：
+# route delete 0.0.0.0 mask 0.0.0.0
+# route add 0.0.0.0 mask 0.0.0.0 192.168.1.1 metric 50
+
+# 参考 https://tachyondevel.medium.com/%E6%95%99%E7%A8%8B-%E5%9C%A8-windows-%E4%B8%8A%E4%BD%BF%E7%94%A8-tun2socks-%E8%BF%9B%E8%A1%8C%E5%85%A8%E5%B1%80%E4%BB%A3%E7%90%86-aa51869dd0d
+
+###############################################################
+
+# linux 上的路由，可参考 https://github.com/xjasonlyu/tun2socks/wiki/Examples
+
+
+###############################################################
+# 其他
+
+# 〇、为什么单独有一个 extra.tun_dns, 而不是直接用 vs的 [dns] 模块
+
+# vs的dns模块是用于解析 socks5 服务传来的域名的, 而在tun中，没有任何东西给我们传域名
+# 因为系统使用了默认路由器作为dns服务器
+
+# 此时 extra.tun_dns 配置 就告诉我们用哪个dns服务器来取代 路由器的dns
+
+# 一、自动模式失败后的紧急修复
+# 如果自动路由发生错误，则可能导致电脑路由出错，连不上网，除了重启解决以外，可以按如下指导进行恢复
+
+# 1. windows
+
+# route delete 在tun_auto_route_direct_list中的ip  (一个一行）
+# route delete 0.0.0.0 mask 0.0.0.0
+# route add 0.0.0.0 mask 0.0.0.0 192.168.1.1 metric 50  (加回原来的网关ip）
+
+# 2. linux
+
+# ip route del 10.0.0.0/15 dev mydev1       (通过 ip route show 来查看该删哪一个)
+# ip route add default via 192.168.1.1 dev eth0 metric 10  (通过ip addr show 找到自己的网卡名称, 替换 eth0）
+
+# ip link set dev tun0 down
+# ip tuntap del mode tun dev tun0
+
+# 二、实现相关
+# 最佳实践应该是通过dial的地址直接自动配置 tun中的直连列表；
+# 但是受限于vs的架构， 配置listen和dial的过程是独立分开互不影响的，导致listen的代码读不到dial的内容
+
+# 三、（技术相关）关于 xjasonlyu/tun2socks 给出的路由命令指导 
+
+# 我们可以明显看到，他给的路由命令在不同平台上，逻辑是不一样的，这是因为它在不同平台上的实现有所不同
+
+# 1. linux和macOS 都在命令行参数中给出了 interface，而windows没有，而且windows要单独配置 vps的ip的路由
+#   这是因为，xjasonlyu/tun2socks 没有在windows上实现 bindToDevice, 而在另外两个平台上实现了
+#   所以在windows上配置多一步； 
+#    不过本作最新代码已经linux，mac和windows 都支持了 bindToDevice,
+
+# 最新的 xjasonlyu/tun2socks 代码也都支持了，但是 其文档指导还停留在旧代码的阶段，特此指出。
+
+# 2. linux 上它需要手动启动tun设备，而其他两个平台不需要
+#   这是因为它在linux上和在其他平台上开启tun设备的逻辑不同。
+#   不过在本作如果你开启 auto_route, 会自动帮你开启tun设备，无需额外操作。

@@ -6,36 +6,28 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/e1732a364fed/v2ray_simple/httpLayer"
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
-	"github.com/e1732a364fed/v2ray_simple/proxy"
 	"github.com/e1732a364fed/v2ray_simple/utils"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 )
 
-//implements advLayer.MuxServer
+// implements advLayer.MuxServer
 type Server struct {
 	Creator
-
 	Config
-
 	http2.Server
+	netLayer.ConnList
 
 	Headers *httpLayer.HeaderPreset
 
 	path string
 
-	newSubConnChan   chan net.Conn
-	fallbackConnChan chan httpLayer.FallbackMeta
-
-	stopOnce sync.Once
-
 	closed bool
-
-	underlay net.Conn //目前仅用于Close
 }
 
 func (s *Server) GetPath() string {
@@ -43,37 +35,33 @@ func (s *Server) GetPath() string {
 }
 
 func (s *Server) Stop() {
-	s.stopOnce.Do(func() {
-		s.closed = true
+	if s.closed {
+		return
+	}
+	s.closed = true
 
-		if s.underlay != nil {
-			s.underlay.Close()
-		}
+	s.CloseDeleteAll()
 
-		if s.fallbackConnChan != nil {
-			close(s.fallbackConnChan)
-		}
-		if s.newSubConnChan != nil {
-			close(s.newSubConnChan)
-		}
-	})
 }
 
 var (
 	clientPreface = []byte(http2.ClientPreface)
 )
 
-func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fallbackConnChan chan httpLayer.FallbackMeta) {
-	s.underlay = underlay
-	s.fallbackConnChan = fallbackConnChan
-	s.newSubConnChan = newSubConnChan
+// 阻塞
+func (s *Server) StartHandle(underlay net.Conn, newSubConnFunc func(net.Conn), fallbackFunc func(httpLayer.FallbackMeta)) {
+	s.closed = false
+
+	oldUnderlay := underlay
+
+	s.Insert(oldUnderlay)
 
 	//先过滤一下h2c 的 preface. 因为不是h2c的话，依然可以试图回落到 h1.
 
 	//可以参考 golang.org/x/net/http2/server.go 里的 readPreface 方法.
 
 	bs := utils.GetPacket()
-	proxy.SetCommonReadTimeout(underlay)
+	netLayer.SetCommonReadTimeout(underlay)
 
 	var notH2c bool
 	n, err := underlay.Read(bs)
@@ -93,25 +81,26 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 	firstBuf := bytes.NewBuffer(bs[:n])
 
 	if notH2c {
-		if ce := utils.CanLogInfo("grpc got not h2c request"); ce != nil {
+		if ce := utils.CanLogInfo("Grpc got not h2c request"); ce != nil {
 			ce.Write()
 		}
 
-		if fallbackConnChan != nil {
+		if fallbackFunc != nil {
 			_, method, path, _, failreason := httpLayer.ParseH1Request(bs, false)
 			if failreason != 0 {
 
-				fallbackConnChan <- httpLayer.FallbackMeta{
+				go fallbackFunc(httpLayer.FallbackMeta{
 					Conn:         underlay,
 					H1RequestBuf: firstBuf,
-				}
+				})
+
 			} else {
-				fallbackConnChan <- httpLayer.FallbackMeta{
+				go fallbackFunc(httpLayer.FallbackMeta{
 					Path:         path,
 					Method:       method,
 					Conn:         underlay,
 					H1RequestBuf: firstBuf,
-				}
+				})
 			}
 		} else {
 			underlay.Write([]byte(httpLayer.Err403response))
@@ -127,13 +116,14 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 		RemainFirstBufLen: n,
 	}
 
-	go s.Server.ServeConn(underlay, &http2.ServeConnOpts{
+	//阻塞
+	s.Server.ServeConn(underlay, &http2.ServeConnOpts{
 		Handler: http.HandlerFunc(func(rw http.ResponseWriter, rq *http.Request) {
 			if s.closed {
 				return
 			}
 
-			//log.Println("request headers", rq.Header)
+			//log.Println("request headers", rq.ContentLength, rq.Header)
 
 			shouldFallback := false
 
@@ -169,12 +159,12 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 			}
 
 			if shouldFallback {
-				if fallbackConnChan == nil {
+				if fallbackFunc == nil {
 					rw.WriteHeader(http.StatusNotFound)
 
 				} else {
 
-					if ce := utils.CanLogInfo("grpc will fallback"); ce != nil {
+					if ce := utils.CanLogInfo("GrpcSimple will fallback"); ce != nil {
 						ce.Write(
 							zap.String("path", p),
 							zap.String("method", rq.Method),
@@ -182,9 +172,9 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 					}
 
 					respConn := &netLayer.IOWrapper{
-						Reader:    rq.Body,
-						Writer:    rw,
-						CloseChan: make(chan struct{}),
+						Reader:   rq.Body,
+						Writer:   rw,
+						Rejecter: httpLayer.RejectConn{ResponseWriter: rw},
 					}
 
 					fm := httpLayer.FallbackMeta{
@@ -194,15 +184,13 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 
 					fm.IsH2 = true
 					fm.H2Request = rq
+					fm.H2RW = rw
 
 					if s.closed {
 						return
 					}
 
-					fallbackConnChan <- fm
-
-					<-respConn.CloseChan
-
+					fallbackFunc(fm)
 				}
 
 				return
@@ -220,15 +208,20 @@ func (s *Server) StartHandle(underlay net.Conn, newSubConnChan chan net.Conn, fa
 				}
 			}
 			rw.WriteHeader(http.StatusOK)
+			if flusher, ok := rw.(http.Flusher); ok {
+				flusher.Flush()
+			}
 
 			sc := newServerConn(rw, rq)
 			if s.closed {
 				return
 			}
-			newSubConnChan <- sc
-			<-sc.closeChan //necessary
+			newSubConnFunc(sc)
 		}),
 	})
+
+	s.CloseDelete(oldUnderlay)
+
 }
 
 func newServerConn(rw http.ResponseWriter, rq *http.Request) (sc *ServerConn) {
@@ -237,44 +230,63 @@ func newServerConn(rw http.ResponseWriter, rq *http.Request) (sc *ServerConn) {
 			br: bufio.NewReader(rq.Body),
 		},
 
-		Writer:    rw,
-		Closer:    rq.Body,
-		closeChan: make(chan int),
+		Writer: rw,
+		Closer: rq.Body,
 	}
+	sc.InitEasyDeadline()
 
 	ta, e := net.ResolveTCPAddr("tcp", rq.RemoteAddr)
 	if e == nil {
 		sc.ra = ta
 	} else {
-		if ce := utils.CanLogErr("grpcSimple parse addr failed, which is weird"); ce != nil {
+		if ce := utils.CanLogErr("Failed in grpcSimple parse addr; Will try X-Forwarded-For"); ce != nil {
 			ce.Write(zap.String("raddr", rq.RemoteAddr), zap.Error(e))
+		}
+
+		/*
+			根据 issue #106， 如果是从 nginx回落到的 grpcSimple，则这个rq.RemoteAddr 会为 "@" 导致无法转成TCPAddr,
+			所以可以读一下 X-Forwarded-For
+
+			https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For
+
+		*/
+
+		xffs := rq.Header.Values(httpLayer.XForwardStr)
+
+		if len(xffs) > 0 {
+			ta, e := net.ResolveIPAddr("ip", xffs[0])
+			if e == nil {
+				sc.ra = ta
+			} else {
+				if ce := utils.CanLogWarn("Failed in grpcSimple parse X-Forwarded-For"); ce != nil {
+					ce.Write(zap.Error(e), zap.Any(httpLayer.XForwardStr, xffs))
+				}
+			}
 		}
 	}
 
-	sc.timeouter = timeouter{
-		closeFunc: func() {
-			sc.Close()
-		},
-	}
 	return
 }
 
 type ServerConn struct {
 	commonPart
-	timeouter
 
 	io.Closer
 	Writer http.ResponseWriter
 
 	closeOnce sync.Once
-	closeChan chan int
 	closed    bool
+}
+
+// implements netLayer.RejectConn, 模仿nginx响应，参考 httpLayer.SetNginx400Response
+func (sc *ServerConn) Reject() {
+	httpLayer.SetNginx400Response(sc.Writer)
+
 }
 
 func (sc *ServerConn) Close() error {
 	sc.closeOnce.Do(func() {
 		sc.closed = true
-		close(sc.closeChan)
 		if sc.Closer != nil {
 			sc.Closer.Close()
 
@@ -289,8 +301,12 @@ func (sc *ServerConn) Write(b []byte) (n int, err error) {
 
 	if sc.closed {
 		return 0, net.ErrClosed
-	} else {
+	}
 
+	select {
+	case <-sc.WriteTimeoutChan():
+		return 0, os.ErrDeadlineExceeded
+	default:
 		buf := commonWrite(b)
 
 		if sc.closed { //较为谨慎，也许commonWrite 刚调用完, 就 g.closed 了

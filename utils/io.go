@@ -5,6 +5,84 @@ import (
 	"sync"
 )
 
+// 摘自 io.CopyBuffer。 因为原始的 CopyBuffer会又调用ReadFrom, 如果splice调用的话会产生无限递归。
+//
+//	这里删掉了ReadFrom, 直接进行经典拷贝
+func ClassicCopy(w io.Writer, r io.Reader) (written int64, err error) {
+	bs := GetPacket()
+	defer PutPacket(bs)
+	for {
+
+		nr, er := r.Read(bs)
+		if nr > 0 {
+			nw, ew := w.Write(bs[0:nr])
+
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					ew = ErrInvalidWrite
+				}
+			}
+			written += int64(nw)
+			if ew != nil {
+				err = ew
+				break
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+
+			err = er
+			break
+		}
+	}
+	return
+}
+
+// 同ClassicCopy，但给出更详细的err
+func ClassicCopy_detailErr(w io.Writer, r io.Reader) (written int64, err error) {
+	bs := GetPacket()
+	defer PutPacket(bs)
+	for {
+
+		nr, er := r.Read(bs)
+		if nr > 0 {
+			nw, ew := w.Write(bs[0:nr])
+
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					ew = ErrInvalidWrite
+				}
+			}
+			written += int64(nw)
+			if ew != nil {
+				err = ErrInErr{ErrDetail: ErrList{[]ErrItem{{Index: 1, E: ew}, {Index: 2, E: er}}}, ErrDesc: "ew", Data: []int{nr, nw}}
+				break
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+
+			err = ErrInErr{ErrDetail: er, ErrDesc: "er"}
+			break
+		}
+	}
+	return
+}
+
+// 一种简单的读写组合, 在ws包中被用到.
+type RW struct {
+	io.Reader
+	io.Writer
+}
+
 type WriteWrapper interface {
 	io.Writer
 
@@ -24,7 +102,7 @@ type ByteWriter interface {
 	Write(p []byte) (n int, err error)
 }
 
-//optionally read from OptionalReader
+// optionally read from OptionalReader
 type ReadWrapper struct {
 	io.Reader
 	OptionalReader    io.Reader
@@ -56,7 +134,7 @@ type DummyReadCloser struct {
 }
 
 // ReadCount -= 1 at each call.
-//if ReadCount<0, return 0, io.EOF
+// if ReadCount<0, return 0, io.EOF
 func (d *DummyReadCloser) Read(p []byte) (int, error) {
 	d.ReadCount -= 1
 	//log.Println("read called", d.ReadCount)
@@ -68,7 +146,7 @@ func (d *DummyReadCloser) Read(p []byte) (int, error) {
 	}
 }
 
-//return nil
+// return nil
 func (DummyReadCloser) Close() error {
 	return nil
 }
@@ -78,7 +156,7 @@ type DummyWriteCloser struct {
 }
 
 // WriteCount -= 1 at each call.
-//if WriteCount<0, return 0, io.EOF
+// if WriteCount<0, return 0, io.EOF
 func (d *DummyWriteCloser) Write(p []byte) (int, error) {
 	d.WriteCount -= 1
 	//log.Println("write called", d.WriteCount)
@@ -91,12 +169,12 @@ func (d *DummyWriteCloser) Write(p []byte) (int, error) {
 	}
 }
 
-//return nil
+// return nil
 func (DummyWriteCloser) Close() error {
 	return nil
 }
 
-//先从Old读，若SwitchChan被关闭, 立刻改为从New读
+// 先从Old读，若SwitchChan被关闭, 立刻改为从New读
 type ReadSwitcher struct {
 	Old, New   io.Reader     //non-nil
 	SwitchChan chan struct{} //non-nil
@@ -148,7 +226,7 @@ func (d *ReadSwitcher) Close() error {
 	return nil
 }
 
-//先向Old写，若SwitchChan被关闭, 改向New写
+// 先向Old写，若SwitchChan被关闭, 改向New写
 type WriteSwitcher struct {
 	Old, New   io.Writer     //non-nil
 	SwitchChan chan struct{} //non-nil
@@ -181,7 +259,7 @@ func (d *WriteSwitcher) Close() error {
 	return nil
 }
 
-//simple structure that send a signal by chan when Close called.
+// simple structure that send a signal by chan when Close called.
 type ChanCloser struct {
 	closeChan chan struct{}
 	once      sync.Once
@@ -198,5 +276,38 @@ func (cc *ChanCloser) Close() error {
 	cc.once.Do(func() {
 		close(cc.closeChan)
 	})
+	return nil
+}
+
+type MultiCloser struct {
+	Closers []io.Closer
+	sync.Once
+}
+
+func (cc *MultiCloser) Close() (result error) {
+	cc.Once.Do(func() {
+		var es ErrList
+		for i, c := range cc.Closers {
+			e := c.Close()
+			if e != nil {
+				es.Add(ErrItem{Index: i, E: e})
+			}
+		}
+		if !es.OK() {
+			result = es
+		}
+	})
+	return
+}
+
+type SimpleCloser interface {
+	Close()
+}
+type NilCloserWrapper struct {
+	SimpleCloser
+}
+
+func (nc NilCloserWrapper) Close() error {
+	nc.SimpleCloser.Close()
 	return nil
 }

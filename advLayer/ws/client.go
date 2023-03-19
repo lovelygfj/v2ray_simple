@@ -17,7 +17,7 @@ import (
 	"github.com/gobwas/ws/wsutil"
 )
 
-//implements advLayer.SingleClient
+// implements advLayer.SingleClient
 type Client struct {
 	Creator
 	requestURL   *url.URL //因为调用gobwas/ws.Dialer.Upgrade 时要传入url，所以我们直接提供包装好的即可
@@ -27,8 +27,11 @@ type Client struct {
 	headers *httpLayer.HeaderPreset
 }
 
-// 这里默认，传入的path必须 以 "/" 为前缀. 本函数 不对此进行任何检查
+// 这里默认，传入的path必须 以 "/" 为前缀. 若path为空，本函数 将自动使用 "/"
 func NewClient(hostAddr, path string, headers *httpLayer.HeaderPreset, isEarly bool) (*Client, error) {
+	if path == "" {
+		path = "/"
+	}
 	u, err := url.Parse("http://" + hostAddr + path)
 	if err != nil {
 		return nil, err
@@ -53,15 +56,14 @@ func (c *Client) IsEarly() bool {
 	return c.UseEarlyData
 }
 
-//与服务端进行 websocket握手，并返回可直接用于读写 websocket 二进制数据的 net.Conn
-func (c *Client) Handshake(underlay net.Conn, ed []byte) (net.Conn, error) {
+// 与服务端进行 websocket握手，并返回可直接用于读写 websocket 二进制数据的 net.Conn
+func (c *Client) Handshake(underlay net.Conn, firstPayloadLen int) (net.Conn, error) {
 
-	if len(ed) > 0 {
+	if c.IsEarly() && firstPayloadLen > 0 && firstPayloadLen <= MaxEarlyDataLen {
 		// 我们要先返回一个 Conn, 然后读取到内层的 vless等协议的握手后，再进行实际的 ws握手
 		return &EarlyDataConn{
 			Conn: underlay,
 
-			earlyData:            ed,
 			requestURL:           c.requestURL,
 			firstHandshakeOkChan: make(chan int, 1),
 			dialer: &ws.Dialer{
@@ -102,6 +104,7 @@ func (c *Client) Handshake(underlay net.Conn, ed []byte) (net.Conn, error) {
 	theConn := &Conn{
 		Conn:            underlay,
 		state:           ws.StateClientSide,
+		underlayIsTCP:   netLayer.IsTCP(underlay) != nil,
 		underlayIsBasic: netLayer.IsBasicConn(underlay),
 	}
 
@@ -134,14 +137,13 @@ type EarlyDataConn struct {
 	realWsConn net.Conn
 
 	notFirst             bool
-	earlyData            []byte
 	requestURL           *url.URL
 	firstHandshakeOkChan chan int
 
 	notFirstRead bool
 }
 
-//第一次会获取到 内部的包头, 然后我们在这里才开始执行ws的握手
+// 第一次会获取到 内部的包头, 然后我们在这里才开始执行ws的握手
 // 这是verysimple的架构造成的. ws层后面跟着的应该就是代理层 的 Handshake调用,它会写入一次包头
 // 我们就是利用这个特征, 把vless包头 和 之前给出的earlydata绑在一起，进行base64编码然后进行ws握手
 func (edc *EarlyDataConn) Write(p []byte) (int, error) {
@@ -152,11 +154,12 @@ func (edc *EarlyDataConn) Write(p []byte) (int, error) {
 		outBuf := utils.GetBuf()
 		encoder := base64.NewEncoder(base64.RawURLEncoding, outBuf)
 
-		multiReader := io.MultiReader(bytes.NewReader(p), bytes.NewReader(edc.earlyData))
-		_, encerr := io.Copy(encoder, multiReader)
+		_, encerr := io.Copy(encoder, bytes.NewReader(p))
 		if encerr != nil {
+			utils.PutBuf(outBuf)
+
 			close(edc.firstHandshakeOkChan)
-			return 0, utils.ErrInErr{ErrDesc: "encode early data err", ErrDetail: encerr}
+			return 0, utils.ErrInErr{ErrDesc: "Err when encode early data", ErrDetail: encerr}
 		}
 		encoder.Close()
 
@@ -164,6 +167,8 @@ func (edc *EarlyDataConn) Write(p []byte) (int, error) {
 
 		br, _, err := edc.dialer.Upgrade(edc.Conn, edc.requestURL)
 		if err != nil {
+			utils.PutBuf(outBuf)
+
 			close(edc.firstHandshakeOkChan)
 			return 0, err
 		}
@@ -173,6 +178,7 @@ func (edc *EarlyDataConn) Write(p []byte) (int, error) {
 		theConn := &Conn{
 			Conn:            edc.Conn,
 			state:           ws.StateClientSide,
+			underlayIsTCP:   netLayer.IsTCP(edc.Conn) != nil,
 			underlayIsBasic: netLayer.IsBasicConn(edc.Conn),
 		}
 
@@ -208,7 +214,7 @@ func (edc *EarlyDataConn) Read(p []byte) (int, error) {
 	if !edc.notFirstRead {
 		_, ok := <-edc.firstHandshakeOkChan
 		if !ok {
-			return 0, errors.New("EarlyDataConn read failed because handshake failed")
+			return 0, errors.New("failed in EarlyDataConn read because handshake failed")
 		}
 		edc.notFirstRead = true
 

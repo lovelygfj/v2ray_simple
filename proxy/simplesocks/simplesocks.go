@@ -1,4 +1,4 @@
-//Package simplesocks implements SimpleSocks protocol for proxy.Server and proxy.Client.
+// Package simplesocks implements SimpleSocks (defined by trojan-go) protocol for proxy.Server and proxy.Client.
 //
 // See https://p4gefau1t.github.io/trojan-go/developer/simplesocks/
 package simplesocks
@@ -28,7 +28,7 @@ var (
 	crlf = []byte{0x0d, 0x0a}
 )
 
-//依照trojan协议的格式读取 地址的域名、ip、port信息
+// 依照trojan协议的格式读取 地址的域名、ip、port信息
 func GetAddrFrom(buf utils.ByteReader) (addr netLayer.Addr, err error) {
 	var b1 byte
 
@@ -83,13 +83,13 @@ func GetAddrFrom(buf utils.ByteReader) (addr netLayer.Addr, err error) {
 		if err != nil {
 			return
 		}
-		if n != 4 {
+		if n != net.IPv6len {
 			err = utils.ErrShortRead
 			return
 		}
 		addr.IP = bs
 	default:
-		err = utils.ErrInErr{ErrDesc: "simplesocks GetAddrFrom err", ErrDetail: utils.ErrInvalidData, Data: b1}
+		err = utils.ErrInErr{ErrDesc: "Err, simplesocks GetAddrFrom", ErrDetail: utils.ErrInvalidData, Data: b1}
 		return
 	}
 
@@ -105,7 +105,7 @@ func GetAddrFrom(buf utils.ByteReader) (addr netLayer.Addr, err error) {
 
 	port := uint16(pb1)<<8 + uint16(pb2)
 	if port == 0 {
-		err = utils.ErrInErr{ErrDesc: "simplesocks port is zero, which is bad", ErrDetail: utils.ErrInvalidData}
+		err = utils.ErrInErr{ErrDesc: "Err, simplesocks port is zero, which is bad", ErrDetail: utils.ErrInvalidData}
 
 		return
 	}

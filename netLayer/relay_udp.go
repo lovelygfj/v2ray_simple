@@ -1,7 +1,7 @@
 package netLayer
 
 import (
-	"net"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,36 +10,30 @@ import (
 	"go.uber.org/zap"
 )
 
+//本文件内含 转发 udp 数据的方法
+
 const (
 	MaxUDP_packetLen = 64 * 1024 // 关于 udp包数据长度，可参考 https://cloud.tencent.com/developer/article/1021196
 
+	DefaultUDP_timeout          = time.Minute * 3
+	DefaultUDP_fullcone_timeout = time.Minute * 30
 )
 
 var (
 	//udp不能无限监听, 否则每一个udp申请都对应打开了一个本地udp端口，一直监听的话时间一长，就会导致 too many open files
 	// 因为实际上udp在网页代理中主要用于dns请求, 所以不妨设的小一点。
 	// 放心，只要能持续不断地从远程服务器收到数据, 建立的udp连接就会持续地更新Deadline 而续命一段时间.
-	UDP_timeout = time.Minute * 3
+	UDP_timeout = DefaultUDP_timeout
+
+	/*
+		fullcone时，wlc 监听本地随机udp端口，而且时刻准备接收 其它端口发来的信息，所以 某个 wrc 被关闭后，wlc 不能随意被关闭；相反，如果 wlc的读取 或写入 遇到 错误而推出后，可以关闭 wrc 和 wlc。
+
+		又因为 vless v1 普通模式 和 trojan 是 在多路复用的 一个通道上 传输 udp的，所以 就算 wrc 发生错误，wlc依然不应该被关闭，否则会影响到 其它流量的传输；
+
+		还有就是，因为 udp 是 无状态的，所以 基本上很难遇到 udp读取失败的情况，一般都是会一直卡住，所以确实需要我们设置超时
+	*/
+	UDP_fullcone_timeout = DefaultUDP_fullcone_timeout
 )
-
-//本文件内含 一些 转发 udp 数据的 接口与方法
-
-//MsgConn一般用于 udp. 是一种类似 net.PacketConn 的包装.
-// 实现 MsgConn接口 的类型 可以被用于 RelayUDP 进行转发。
-//
-//ReadMsgFrom直接返回数据, 这样可以尽量避免多次数据拷贝。
-//
-//使用Addr，是因为有可能请求地址是个域名，而不是ip; 而且通过Addr, MsgConn实际上有可能支持通用的情况,
-// 即可以用于 客户端 一会 请求tcp，一会又请求udp，一会又请求什么其它网络层 这种奇葩情况.
-type MsgConn interface {
-	NetDeadliner
-
-	ReadMsgFrom() ([]byte, Addr, error)
-	WriteMsgTo([]byte, Addr) error
-	CloseConnWithRaddr(raddr Addr) error //关闭特定连接
-	Close() error                        //关闭所有连接
-	Fullcone() bool                      //若Fullcone, 则在转发因另一端关闭而结束后, RelayUDP函数不会Close它.
-}
 
 /*
 udp是无连接的，所以需要考虑超时问题。
@@ -70,7 +64,7 @@ udp是无连接的，所以需要考虑超时问题。
 
 	4. fullcone, 此时不能对整个监听端口进行close，会影响其它外部链接发来的连接。
 
-	5. vless v1 这种单路client的udp转发方式, 此时需要判断lc.ReadMsgFrom得到的 raddr是否是已知地址,
+	5. vless v1 这种单路client的udp转发方式, 此时需要判断lc.ReadMsg得到的 raddr是否是已知地址,
 		如果是未知的, 则不会再使用原来的rc，而是要拨号新通道
 
 		也就是说，lc是有且仅有一个的, 因为是socks5 / dokodemo都是采用的单信道的方式,
@@ -90,32 +84,53 @@ udp是无连接的，所以需要考虑超时问题。
 	但是, vless v1虽然是分离信道, 但还有可能读到 umfurs信息, 所以还是不应设置超时.
 */
 
-// 阻塞. 返回从 rc 下载的总字节数. 拷贝完成后自动关闭双端连接.
+/*
+	阻塞. 返回从 rc 下载的总字节数. 拷贝完成后，如不为fullcone，则自动关闭双端连接.
+
+若为fullcone，则 rc错误时，rc可以关闭，而 lc 则不可以随意关闭; 若lc错误时，则两端都可关闭
+*/
 func RelayUDP(rc, lc MsgConn, downloadByteCount, uploadByteCount *uint64) uint64 {
+	isfullcone := rc.Fullcone() && lc.Fullcone()
 	go func() {
+
+		if ce := utils.CanLogDebug("Try CopyUDP"); ce != nil {
+			ce.Write(zap.String("from", reflect.TypeOf(lc).String()), zap.String("to", reflect.TypeOf(rc).String()))
+		}
+
 		var count uint64
 
+		var lcReadErr bool
+
 		for {
-			bs, raddr, err := lc.ReadMsgFrom()
+			bs, raddr, err := lc.ReadMsg()
 			if err != nil {
+				lcReadErr = true
 				break
 			}
 
 			if ce := utils.CanLogDebug("RelayUDP will write to"); ce != nil {
-				ce.Write(zap.String("raddr", raddr.String()), zap.Int("len", len(bs)))
+				ce.Write(zap.String("src addr", raddr.String()), zap.Int("len", len(bs)))
 			}
 
-			err = rc.WriteMsgTo(bs, raddr)
+			err = rc.WriteMsg(bs, raddr)
 			if err != nil {
-
 				break
 			}
 
 			count += uint64(len(bs))
 		}
-		if !(rc.Fullcone() && lc.Fullcone()) {
+
+		if !isfullcone {
 			rc.Close()
 			lc.Close()
+		} else {
+
+			rc.Close()
+
+			if lcReadErr {
+				lc.Close()
+			}
+
 		}
 
 		if uploadByteCount != nil {
@@ -124,43 +139,49 @@ func RelayUDP(rc, lc MsgConn, downloadByteCount, uploadByteCount *uint64) uint64
 
 	}()
 
-	count2, _ := relayUDP_rc_toLC(rc, lc, downloadByteCount, nil)
+	count2, rcReadErr := relayUDP_rc_toLC(rc, lc, downloadByteCount, nil)
+	rc.Close()
+
+	if isfullcone {
+
+		if !rcReadErr {
+			lc.Close()
+		}
+	} else {
+		lc.Close()
+	}
+
 	return count2
 }
 
-//循环从rc读取数据，并写入lc，直到错误发生。若 downloadByteCount 给出，会更新 下载总字节数。
-// 返回此次所下载的字节数。如果是rc读取产生了错误导致的退出, 返回的bool为true
+/*
+循环从rc读取数据，并写入lc，直到错误发生。若 downloadByteCount 给出，会更新 下载总字节数。
+返回此次所下载的字节数。如果是rc读取产生了错误导致的退出, 返回的bool为true。若mutex给出，则 内部调用 lc.WriteMsg 时会进行 锁定。
+*/
 func relayUDP_rc_toLC(rc, lc MsgConn, downloadByteCount *uint64, mutex *sync.RWMutex) (uint64, bool) {
-	//utils.Debug("relayUDP_rc_toLC called")
+
 	var count uint64
 	var rcwrong bool
 	for {
-		bs, raddr, err := rc.ReadMsgFrom()
+		bs, raddr, err := rc.ReadMsg()
 		if err != nil {
 			rcwrong = true
 			break
 		}
 
-		//if ce := utils.CanLogDebug("relayUDP_rc_toLC got msg from rc"); ce != nil {
-		//	ce.Write(zap.String("raddr", raddr.String()), zap.Int("len", len(bs)))
-		//}
 		if mutex != nil {
 			mutex.Lock()
-			err = lc.WriteMsgTo(bs, raddr)
+			err = lc.WriteMsg(bs, raddr)
 			mutex.Unlock()
 
 		} else {
-			err = lc.WriteMsgTo(bs, raddr)
+			err = lc.WriteMsg(bs, raddr)
 
 		}
 		if err != nil {
 			break
 		}
 		count += uint64(len(bs))
-	}
-	if !(rc.Fullcone() && lc.Fullcone()) {
-		rc.Close()
-		lc.Close()
 	}
 
 	if downloadByteCount != nil {
@@ -176,9 +197,21 @@ func relayUDP_rc_toLC(rc, lc MsgConn, downloadByteCount *uint64, mutex *sync.RWM
 // 不过分离信道只能用于代理，不能用于 direct, 因为direct为了实现fullcone, 对所有rc连接都用的同一个udp端口。
 // 阻塞. 返回从 rc 下载的总字节数. 拷贝完成后自动关闭双端连接.
 func RelayUDP_separate(rc, lc MsgConn, firstAddr *Addr, downloadByteCount, uploadByteCount *uint64, dialfunc func(raddr Addr) MsgConn) uint64 {
+	//一般而言，lc为 socks5 的MsgConn，rc 为 vless v1 客户端的 MsgConn
+
 	var lc_mutex sync.RWMutex
 
+	var mainhash HashableAddr
+
 	utils.Debug("RelayUDP_separate called")
+
+	rc_raddrMap := make(map[HashableAddr]MsgConn)
+	if firstAddr != nil {
+
+		mainhash = firstAddr.GetHashable()
+
+		rc_raddrMap[mainhash] = rc
+	}
 
 	go func() {
 		var count uint64
@@ -186,13 +219,8 @@ func RelayUDP_separate(rc, lc MsgConn, firstAddr *Addr, downloadByteCount, uploa
 		// 然后 对每一个rc, 创建单独goroutine 读取rc, 然后写入lc.
 		// 因为是多通道的, 所以涉及到了 对 lc 写入的 并发抢占问题, 要加锁。
 
-		rc_raddrMap := make(map[HashableAddr]MsgConn)
-		if firstAddr != nil {
-			rc_raddrMap[firstAddr.GetHashable()] = rc
-		}
-
 		for {
-			bs, raddr, err := lc.ReadMsgFrom()
+			bs, raddr, err := lc.ReadMsg()
 			if err != nil {
 				break
 			}
@@ -233,7 +261,7 @@ func RelayUDP_separate(rc, lc MsgConn, firstAddr *Addr, downloadByteCount, uploa
 				}()
 			}
 
-			err = rc.WriteMsgTo(bs, raddr)
+			err = rc.WriteMsg(bs, raddr)
 			if err != nil {
 
 				lc_mutex.Lock()
@@ -248,7 +276,9 @@ func RelayUDP_separate(rc, lc MsgConn, firstAddr *Addr, downloadByteCount, uploa
 
 			count += uint64(len(bs))
 		}
-		//上面循环 只有lc 读取失败时才会退出, 此时因为我们不是多路复用, 所以可以放心close
+		//上面循环 只有lc 读取失败时才会退出,
+
+		//lc退出后，我们要 关闭所有rc连接。此时因为我们不是多路复用, 所以可以放心close
 
 		lc_mutex.Lock()
 		for _, thisrc := range rc_raddrMap {
@@ -264,215 +294,77 @@ func RelayUDP_separate(rc, lc MsgConn, firstAddr *Addr, downloadByteCount, uploa
 
 	}()
 
-	count2, _ := relayUDP_rc_toLC(rc, lc, downloadByteCount, &lc_mutex)
+	count2, rcwrong := relayUDP_rc_toLC(rc, lc, downloadByteCount, &lc_mutex)
+	if rcwrong {
+		lc_mutex.Lock()
+		delete(rc_raddrMap, mainhash)
+		lc_mutex.Unlock()
+
+		rc.Close()
+
+	}
 	return count2
 }
 
-// symmetric, proxy/dokodemo 有用到. 实现 MsgConn
-type UniTargetMsgConn struct {
-	net.Conn
-	Target Addr
-}
+// /*
+// relay udp  有两种针对不同通道的技术
 
-func (u UniTargetMsgConn) Fullcone() bool {
-	return false
-}
+// 一种是针对单来源通道的技术，通常是udp in tcp的情况，此时，我们用MsgConn + RelayUDP 方法很方便
 
-func (u UniTargetMsgConn) ReadMsgFrom() ([]byte, Addr, error) {
-	bs := utils.GetPacket()
+// 另一种是直接读udp的技术，目前我们用很多代码来适配它，也能包装MsgConn里，但是非常不美观，繁琐。
+// 因为udp是多来源的，我们为了确定单一来源，就要全局读，然后定义一个map, 为每一个来源的地址存储一个MsgConn
 
-	n, err := u.Conn.Read(bs)
-	if err != nil {
-		return nil, Addr{}, err
-	}
-	return bs[:n], u.Target, err
-}
+// 我们重新定义一个MsgProducer 和 MsgConsumer，就方便很多. 这是针对多来源的转发。
 
-func (u UniTargetMsgConn) WriteMsgTo(bs []byte, _ Addr) error {
-	_, err := u.Conn.Write(bs)
-	return err
-}
+// 如此，一个 UDPConn就相当于一个 MsgProducer, 它的to 可以由 tproxy 或者 msg内部的数据提取出来
 
-func (u UniTargetMsgConn) CloseConnWithRaddr(raddr Addr) error {
-	return u.Conn.Close()
-}
+// 不过，这种抽象一样需要map进行记忆，才能区分不同来源的from。针对不同的from，要使用以前对它发信号所使用的端口。
 
-func (u UniTargetMsgConn) Close() error {
-	return u.Conn.Close()
-}
+// 所以两种技术可能是等价的。
+// */
+// func RelayMsg(rc, lc MsgHub, downloadByteCount, uploadByteCount *uint64) uint64 {
+// 	go CopyMsgFromP2C(lc, rc, uploadByteCount)
 
-//UDPMsgConn 实现 MsgConn。 可满足fullcone/symmetric. 在proxy/direct 被用到.
-type UDPMsgConn struct {
-	*net.UDPConn
-	IsServer, fullcone, closed bool
+// 	var dbc uint64
+// 	CopyMsgFromP2C(rc, lc, &dbc)
 
-	symmetricMap      map[HashableAddr]*net.UDPConn
-	symmetricMapMutex sync.RWMutex
+// 	if downloadByteCount != nil {
+// 		atomic.AddUint64(downloadByteCount, dbc)
+// 	}
+// 	return dbc
 
-	symmetricMsgReadChan chan AddrData
-}
+// }
 
-// NewUDPMsgConn 创建一个 UDPMsgConn 并使用传入的 laddr 监听udp; 若未给出laddr, 将使用一个随机可用的端口监听.
-// 如果是普通的单目标的客户端，用 (nil,false,false) 即可.
-//
-// 满足fullcone/symmetric, 由 fullcone 的值决定.
-func NewUDPMsgConn(laddr *net.UDPAddr, fullcone bool, isserver bool) (*UDPMsgConn, error) {
-	uc := new(UDPMsgConn)
+// func CopyMsgFromP2C(p MsgProducer, c MsgConsumer, countPtr *uint64) {
+// 	var bc uint64
 
-	udpConn, err := net.ListenUDP("udp", laddr) //根据反映，这里是有可能报错的，以后可以考虑重试多次。
-	if err != nil {
-		return nil, err
-	}
-	udpConn.SetReadBuffer(MaxUDP_packetLen)
-	udpConn.SetWriteBuffer(MaxUDP_packetLen)
+// 	for {
+// 		msg, from, to, err := p.ProduceMsg()
+// 		if err != nil {
+// 			break
+// 		}
+// 		err = c.ConsumeMsg(msg, from, to)
+// 		if err != nil {
+// 			break
+// 		}
+// 		bc += uint64(len(msg))
+// 	}
 
-	uc.UDPConn = udpConn
-	uc.fullcone = fullcone
-	uc.IsServer = isserver
-	if !fullcone {
-		uc.symmetricMap = make(map[HashableAddr]*net.UDPConn)
-		uc.symmetricMsgReadChan = make(chan AddrData, 50) //缓存大一点比较好. 假设有十个udp连接, 每一个都连续读了5个信息，这样就会装满50个缓存了。
+// 	if countPtr != nil {
+// 		atomic.AddUint64(countPtr, bc)
+// 	}
 
-		//我们暂时不把udpConn放入 symmetricMap 中，而是等待第一次Write成功后再放入.
-	}
-	return uc, nil
-}
+// }
 
-func (u *UDPMsgConn) Fullcone() bool {
-	return u.fullcone
-}
+// type MsgHub interface {
+// 	MsgProducer
+// 	MsgConsumer
+// }
 
-func (u *UDPMsgConn) readSymmetricMsgFromConn(conn *net.UDPConn, thishash HashableAddr) {
-	if ce := utils.CanLogDebug("readSymmetricMsgFromConn called"); ce != nil {
-		ce.Write(zap.String("addr", thishash.String()))
-	}
-	for {
-		bs := utils.GetPacket()
+// type MsgProducer interface {
+// 	ProduceMsg() (msg []byte, from, to Addr, err error)
+// }
 
-		conn.SetReadDeadline(time.Now().Add(UDP_timeout))
-
-		n, ad, err := conn.ReadFromUDP(bs)
-
-		if err != nil {
-			break
-		}
-		//conn.SetReadDeadline(time.Time{})
-
-		u.symmetricMsgReadChan <- AddrData{Data: bs[:n], Addr: NewAddrFromUDPAddr(ad)}
-	}
-
-	u.symmetricMapMutex.Lock()
-	delete(u.symmetricMap, thishash)
-	u.symmetricMapMutex.Unlock()
-
-	conn.Close()
-
-}
-
-func (u *UDPMsgConn) ReadMsgFrom() ([]byte, Addr, error) {
-	if u.fullcone {
-		bs := utils.GetPacket()
-
-		n, ad, err := u.UDPConn.ReadFromUDP(bs)
-
-		if err != nil {
-			return nil, Addr{}, err
-		}
-
-		return bs[:n], NewAddrFromUDPAddr(ad), nil
-	} else {
-		ad, ok := <-u.symmetricMsgReadChan
-		if ok {
-			ad.Addr.Network = "udp"
-			return ad.Data, ad.Addr, nil
-		} else {
-			return nil, Addr{}, net.ErrClosed
-		}
-	}
-
-}
-
-func (u *UDPMsgConn) WriteMsgTo(bs []byte, raddr Addr) error {
-
-	var theConn *net.UDPConn
-
-	if !u.fullcone && !u.IsServer {
-		//非fullcone时,  强制 symmetric, 对每个远程地址 都使用一个 对应的新laddr
-
-		thishash := raddr.GetHashable()
-		thishash.Network = "udp" //有可能调用者忘配置Network项.
-
-		if len(u.symmetricMap) == 0 {
-
-			_, err := u.UDPConn.WriteTo(bs, raddr.ToUDPAddr())
-			if err == nil {
-				u.symmetricMapMutex.Lock()
-				u.symmetricMap[thishash] = u.UDPConn
-				u.symmetricMapMutex.Unlock()
-			}
-			go u.readSymmetricMsgFromConn(u.UDPConn, thishash)
-			return err
-		}
-
-		u.symmetricMapMutex.RLock()
-		theConn = u.symmetricMap[thishash]
-		u.symmetricMapMutex.RUnlock()
-
-		if theConn == nil {
-			var e error
-			theConn, e = net.ListenUDP("udp", nil)
-			if e != nil {
-				return e
-			}
-
-			u.symmetricMapMutex.Lock()
-			u.symmetricMap[thishash] = theConn
-			u.symmetricMapMutex.Unlock()
-
-			go u.readSymmetricMsgFromConn(theConn, thishash)
-		}
-
-	} else {
-		theConn = u.UDPConn
-	}
-
-	_, err := theConn.WriteTo(bs, raddr.ToUDPAddr())
-	return err
-}
-
-func (u *UDPMsgConn) CloseConnWithRaddr(raddr Addr) error {
-	if !u.IsServer {
-		if u.fullcone {
-			//u.UDPConn.SetReadDeadline(time.Now())
-
-		} else {
-			u.symmetricMapMutex.Lock()
-
-			thehash := raddr.GetHashable()
-			theConn := u.symmetricMap[thehash]
-
-			if theConn != nil {
-				delete(u.symmetricMap, thehash)
-				theConn.Close()
-
-			}
-
-			u.symmetricMapMutex.Unlock()
-		}
-	}
-	return nil
-}
-
-func (u *UDPMsgConn) Close() error {
-
-	if !u.closed {
-		u.closed = true
-
-		if !u.fullcone {
-			close(u.symmetricMsgReadChan)
-		}
-		return u.UDPConn.Close()
-	}
-
-	return nil
-}
+// type MsgConsumer interface {
+// 	ConsumeMsg(msg []byte, from, to Addr) (err error)
+// }

@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	"github.com/yl2chen/cidranger"
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 )
 
-//用于 HasFullOrSubDomain函数
+// 用于 HasFullOrSubDomain函数
 type DomainHaser interface {
 	HasDomain(string) bool
 }
@@ -21,7 +23,7 @@ func (mdh MapDomainHaser) HasDomain(d string) bool {
 	return found
 }
 
-//会以点号分裂domain判断每一个子域名是否被包含，最终会试图匹配整个字符串.
+// 会以点号分裂domain判断每一个子域名是否被包含，最终会试图匹配整个字符串.
 func HasFullOrSubDomain(domain string, ds DomainHaser) bool {
 	lastDotIndex := len(domain)
 
@@ -50,12 +52,16 @@ type TargetDescription struct {
 	UserIdentityStr string
 }
 
-// Set 是 “集合” 的意思, 是一组相同类型的数据放到一起。
-//  这里的相同点，就是它们同属于 将发往一个方向, 即同属一个路由策略。
-// 任意一个参数匹配后，都将发往相同的方向，由该方向OutTag 指定。
-// RouteSet 只负责把一些属性相同的 “网络层/传输层 特征” 放到一起。
-//
-//这里主要通过 ip，域名 和 inTag 进行分流。域名的匹配又分多种方式。
+/*
+RouteSet 只负责把一些属性相同的 “网络层/传输层 特征” 放到一起。
+
+Set 是 “集合” 的意思, 是一组相同类型的数据放到一起。
+
+	这里的相同点，就是它们同属于 将发往一个方向, 即同属一个路由策略。
+
+任意一个网络参数匹配后，都将发往相同的方向，由该方向OutTag 指定。
+若还给出了 InTags, Users 或 传输层, 则这些条件都通过后, 才进行网络层判断.
+*/
 type RouteSet struct {
 	//网络层
 	NetRanger cidranger.Ranger    //一个范围
@@ -88,6 +94,7 @@ type RouteSet struct {
 
 }
 
+// 对于我的country，直接直连
 func NewRouteSetForMyCountry(iso string) *RouteSet {
 	if len(iso) != 2 {
 		return nil
@@ -119,11 +126,11 @@ func NewFullRouteSet() *RouteSet {
 	}
 }
 
-func (sg *RouteSet) IsIn(td *TargetDescription) bool {
+func (rs *RouteSet) IsIn(td *TargetDescription) bool {
 	var tagOk bool
-	if len(sg.InTags) > 0 {
+	if len(rs.InTags) > 0 {
 		if td.InTag != "" {
-			_, tagOk = sg.InTags[td.InTag]
+			_, tagOk = rs.InTags[td.InTag]
 		}
 	} else {
 		tagOk = true
@@ -134,9 +141,9 @@ func (sg *RouteSet) IsIn(td *TargetDescription) bool {
 
 	var userOk bool
 
-	if len(sg.Users) > 0 {
+	if len(rs.Users) > 0 {
 		if td.UserIdentityStr != "" {
-			_, userOk = sg.Users[td.UserIdentityStr]
+			_, userOk = rs.Users[td.UserIdentityStr]
 		}
 	} else {
 		userOk = true
@@ -146,70 +153,79 @@ func (sg *RouteSet) IsIn(td *TargetDescription) bool {
 		return false
 	}
 
-	if sg.IsNoLimitForNetworkLayer() { //necessary
-		return true
-	}
-
-	return sg.IsAddrIn(td.Addr)
+	return rs.IsAddrIn(td.Addr)
 
 }
 
-func (sg *RouteSet) IsTransportProtocolAllowed(p uint16) bool {
-	return sg.AllowedTransportLayerProtocols&p > 0
+func (rs *RouteSet) IsTransportProtocolAllowed(p uint16) bool {
+	return rs.AllowedTransportLayerProtocols&p > 0
 }
 
-func (sg *RouteSet) IsAddrNetworkAllowed(a Addr) bool {
+func (rs *RouteSet) IsAddrNetworkAllowed(a Addr) bool {
 
 	if a.Network == "" {
-		return sg.IsTransportProtocolAllowed(TCP)
+		return rs.IsTransportProtocolAllowed(TCP)
 	}
 
 	p := StrToTransportProtocol(a.Network)
 
-	return sg.IsTransportProtocolAllowed(p)
+	if p != UnknownNetwork {
+		return rs.IsTransportProtocolAllowed(p)
+
+	} else {
+		return true //未知网络类型的话，不太建议阻拦，因为每个新的网络类型都需要加入代码中进行准确判断。
+	}
 }
 
-func (sg *RouteSet) IsUDPAllowed() bool {
-	return sg.IsTransportProtocolAllowed(UDP)
+func (rs *RouteSet) IsUDPAllowed() bool {
+	return rs.IsTransportProtocolAllowed(UDP)
 }
 
-func (sg *RouteSet) IsTCPAllowed() bool {
-	return sg.IsTransportProtocolAllowed(TCP)
+func (rs *RouteSet) IsTCPAllowed() bool {
+	return rs.IsTransportProtocolAllowed(TCP)
 }
 
-func (sg *RouteSet) IsNoLimitForNetworkLayer() bool {
-	if (sg.NetRanger == nil || sg.NetRanger.Len() == 0) && len(sg.IPs) == 0 && len(sg.Match) == 0 && len(sg.Domains) == 0 && len(sg.Full) == 0 && len(sg.Countries) == 0 && len(sg.Geosites) == 0 {
+func (rs *RouteSet) IsNoLimitForNetworkLayer() bool {
+	if (rs.NetRanger == nil || rs.NetRanger.Len() == 0) && len(rs.IPs) == 0 && len(rs.Match) == 0 && len(rs.Domains) == 0 && len(rs.Full) == 0 && len(rs.Countries) == 0 && len(rs.Geosites) == 0 {
 		//如果仅限制了一个传输层协议，且本集合里没有任何其它内容，那就直接通过
 		return true
 	}
 	return false
 }
 
-func (sg *RouteSet) IsAddrIn(a Addr) bool {
+func (rs *RouteSet) IsAddrIn(a Addr) bool {
 	//我们先过滤传输层，再过滤网络层, 因为传输层过滤非常简单。
 
-	if !sg.IsAddrNetworkAllowed(a) {
+	if !rs.IsAddrNetworkAllowed(a) {
 		return false
+	}
+
+	if rs.IsNoLimitForNetworkLayer() { //necessary
+		return true
 	}
 
 	//开始网络层判断
 	if len(a.IP) > 0 {
-		if sg.NetRanger != nil && sg.NetRanger.Len() > 0 {
-			if has, _ := sg.NetRanger.Contains(a.IP); has {
+		if ip4 := a.IP.To4(); ip4 != nil { //发现有时传入的是ipv6形式的ipv4，这会对我们过滤干扰
+			a.IP = ip4
+		}
+
+		if rs.NetRanger != nil && rs.NetRanger.Len() > 0 {
+			if has, _ := rs.NetRanger.Contains(a.IP); has {
 				return true
 			}
 		}
-		if len(sg.Countries) > 0 {
+		if len(rs.Countries) > 0 {
 
 			if isoStr := GetIP_ISO(a.IP); isoStr != "" {
-				if _, found := sg.Countries[isoStr]; found {
+				if _, found := rs.Countries[isoStr]; found {
 					return true
 				}
 			}
 
 		}
-		if len(sg.IPs) > 0 {
-			if _, found := sg.IPs[a.GetNetIPAddr()]; found {
+		if len(rs.IPs) > 0 {
+			if _, found := rs.IPs[a.GetNetIPAddr()]; found {
 				return true
 			}
 		}
@@ -217,39 +233,39 @@ func (sg *RouteSet) IsAddrIn(a Addr) bool {
 
 	if a.Name != "" {
 
-		if len(sg.Full) > 0 {
-			if _, found := sg.Full[a.Name]; found {
+		if len(rs.Full) > 0 {
+			if _, found := rs.Full[a.Name]; found {
 				return true
 			}
 		}
 
-		if len(sg.Domains) > 0 {
+		if len(rs.Domains) > 0 {
 
-			if HasFullOrSubDomain(a.Name, MapDomainHaser(sg.Domains)) {
+			if HasFullOrSubDomain(a.Name, MapDomainHaser(rs.Domains)) {
 				return true
 			}
 
 		}
 
-		if len(sg.Match) > 0 {
-			for _, m := range sg.Match {
+		if len(rs.Match) > 0 {
+			for _, m := range rs.Match {
 				if strings.Contains(a.Name, m) {
 					return true
 				}
 			}
 		}
 
-		if len(sg.Regex) > 0 {
-			for _, reg := range sg.Regex {
+		if len(rs.Regex) > 0 {
+			for _, reg := range rs.Regex {
 				if reg.MatchString(a.Name) {
 					return true
 				}
 			}
 		}
 
-		if len(sg.Geosites) > 0 && len(GeositeListMap) > 0 {
+		if len(rs.Geosites) > 0 && len(GeositeListMap) > 0 {
 
-			for _, g := range sg.Geosites {
+			for _, g := range rs.Geosites {
 				if IsDomainInsideGeosite(g, a.Name) {
 					return true
 				}
@@ -261,7 +277,36 @@ func (sg *RouteSet) IsAddrIn(a Addr) bool {
 	return false
 }
 
-//一个完整的 所有RouteSet的列表，进行路由时，直接遍历即可。
+func (rs *RouteSet) Clone() (newOne *RouteSet) {
+	newOne = &RouteSet{
+		NetRanger:                      cidranger.NewPCTrieRanger(),
+		IPs:                            maps.Clone(rs.IPs),
+		Match:                          slices.Clone(rs.Match),
+		Domains:                        maps.Clone(rs.Domains),
+		Full:                           maps.Clone(rs.Full),
+		Users:                          maps.Clone(rs.Users),
+		Geosites:                       slices.Clone(rs.Geosites),
+		InTags:                         maps.Clone(rs.InTags),
+		OutTags:                        slices.Clone(rs.OutTags),
+		OutTag:                         rs.OutTag,
+		Regex:                          slices.Clone(rs.Regex),
+		Countries:                      maps.Clone(rs.Countries),
+		AllowedTransportLayerProtocols: rs.AllowedTransportLayerProtocols,
+	}
+
+	entries, _ := newOne.NetRanger.CoveredNetworks(*cidranger.AllIPv4)
+	for _, v := range entries {
+		newOne.NetRanger.Insert(v)
+	}
+	ip6entries, _ := newOne.NetRanger.CoveredNetworks(*cidranger.AllIPv6)
+	for _, v := range ip6entries {
+		newOne.NetRanger.Insert(v)
+	}
+
+	return
+}
+
+// 一个完整的 所有RouteSet的列表，进行路由时，直接遍历即可。
 // 所谓的路由实际上就是分流。
 type RoutePolicy struct {
 	List []*RouteSet
@@ -279,19 +324,26 @@ func (rp *RoutePolicy) AddRouteSet(rs *RouteSet) {
 	}
 }
 
-// 返回一个 proxy.Client 的 tag。
+func (rp *RoutePolicy) Clone() (newOne RoutePolicy) {
+	for _, v := range rp.List {
+		newOne.List = append(newOne.List, v.Clone())
+	}
+	return
+}
+
+// 根据td 以及 RoutePolicy的配置 计算出 一个 对应的 proxy.Client 的 tag。
 // 默认情况下，始终具有direct这个tag以及 proxy这个tag，无需用户额外在配置文件中指定。
 // 默认如果不匹配任何值的话，就会流向 "proxy" tag，也就是客户设置的 remoteClient的值。
-func (rp *RoutePolicy) GetOutTag(td *TargetDescription) string {
-	for _, s := range rp.List {
-		if s.IsIn(td) {
-			switch n := len(s.OutTags); n {
+func (rp *RoutePolicy) CalcuOutTag(td *TargetDescription) string {
+	for _, rs := range rp.List {
+		if rs.IsIn(td) {
+			switch n := len(rs.OutTags); n {
 			case 0:
-				return s.OutTag
+				return rs.OutTag
 			case 1:
-				return s.OutTags[0]
+				return rs.OutTags[0]
 			default:
-				return s.OutTags[rand.Intn(n)]
+				return rs.OutTags[rand.Intn(n)]
 			}
 
 		}

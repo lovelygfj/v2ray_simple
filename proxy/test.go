@@ -16,18 +16,26 @@ import (
 	"github.com/e1732a364fed/v2ray_simple/utils"
 )
 
-func TestTCP(protocol string, version int, port string, t *testing.T) {
+func TestTCP(protocol string, specialUUID string, version int, port string, extraQuery string, t *testing.T) {
 	utils.LogLevel = utils.Log_debug
 	utils.InitLog("")
 
-	url := protocol + "://a684455c-b14f-11ea-bf0d-42010aaa0003@127.0.0.1:" + port + "?version=" + strconv.Itoa(version)
-	server, hase, _ := ServerFromURL(url)
-	if hase {
+	uuid := "a684455c-b14f-11ea-bf0d-42010aaa0003"
+	if specialUUID != "" {
+		uuid = specialUUID
+	}
+
+	url := protocol + "://" + uuid + "@127.0.0.1:" + port + "?v=" + strconv.Itoa(version)
+	if extraQuery != "" {
+		url += "&" + extraQuery
+	}
+	server, e := ServerFromURL(url)
+	if e != nil {
 		t.FailNow()
 	}
 	defer server.Stop()
-	client, hase, _ := ClientFromURL(url)
-	if hase {
+	client, e := ClientFromURL(url)
+	if e != nil {
 		t.FailNow()
 	}
 
@@ -60,7 +68,7 @@ func TestTCP(protocol string, version int, port string, t *testing.T) {
 				defer lc.Close()
 				wlc, _, targetAddr, err := server.Handshake(lc)
 				if err != nil {
-					t.Logf("failed in handshake form %v: %v", server.AddrStr(), err)
+					t.Logf("failed in handshake from %v: %v", server.AddrStr(), err)
 					t.Fail()
 					return
 				}
@@ -129,17 +137,19 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 
 	t.Log("fakeServerEndLocalServer port is ", proxyPort)
 
-	fmtStr := protocol + "://a684455c-b14f-11ea-bf0d-42010aaa0003@127.0.0.1:%s?version=%d&vless1_udp_multi=%d"
+	uuid := "a684455c-b14f-11ea-bf0d-42010aaa0003"
 
-	url := fmt.Sprintf(fmtStr, proxyPort, version, use_multi)
-	fakeServerEndLocalServer, hase, errx := ServerFromURL(url)
-	if hase {
+	fmtStr := protocol + "://%s@127.0.0.1:%s?v=%d&vless1_udp_multi=%d"
+
+	url := fmt.Sprintf(fmtStr, uuid, proxyPort, version, use_multi)
+	fakeServerEndLocalServer, errx := ServerFromURL(url)
+	if errx != nil {
 		t.Log("fakeClientEndLocalServer parse err", errx)
 		t.FailNow()
 	}
 	defer fakeServerEndLocalServer.Stop()
-	fakeClientEndRemoteClient, hase, errx := ClientFromURL(url)
-	if hase {
+	fakeClientEndRemoteClient, errx := ClientFromURL(url)
+	if errx != nil {
 		t.Log("fakeClientEndRemoteClient parse err", errx)
 		t.FailNow()
 	}
@@ -252,7 +262,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 				//发现既可能读取 firstbuf，也可能读取 wlc，随机发生？
 
 				t.Log(protocol + " read from wlc")
-				bs, raddr, _ := wlc.ReadMsgFrom()
+				bs, raddr, _ := wlc.ReadMsg()
 
 				t.Log(protocol+" got wlc", bs)
 
@@ -269,31 +279,31 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 				na, _ := netLayer.NewAddr(remoteAddrStr)
 				na.Network = "udp"
 
-				wrc, err := netLayer.NewUDPMsgConn(nil, false, false)
+				wrc, err := netLayer.NewUDPMsgConn(nil, false, false, nil)
 				if err != nil {
 					t.Logf("failed netLayer.NewUDPMsgConn\n")
 					t.Fail()
 					return
 				}
 
-				err = wrc.WriteMsgTo(bs, na)
+				err = wrc.WriteMsg(bs, na)
 				if err != nil {
-					t.Logf("failed wrc.WriteMsgTo : %v", err)
+					t.Logf("failed wrc.WriteMsg : %v", err)
 					t.Fail()
 					return
 				}
 
-				bs, _, err = wrc.ReadMsgFrom()
+				bs, _, err = wrc.ReadMsg()
 
 				if err != nil {
-					t.Logf("failed wrc.ReadMsgFrom : %v", err)
+					t.Logf("failed wrc.ReadMsg : %v", err)
 					t.Fail()
 					return
 				}
 
-				err = wlc.WriteMsgTo(bs, raddr)
+				err = wlc.WriteMsg(bs, raddr)
 				if err != nil {
-					t.Logf("failed wlc.WriteMsgTo : %v", err)
+					t.Logf("failed wlc.WriteMsg : %v", err)
 					t.Fail()
 					return
 				}
@@ -319,7 +329,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 
 	t.Log("client handshake success")
 
-	err = wrc.WriteMsgTo(hellodata, targetStruct_forFakeUDPServer)
+	err = wrc.WriteMsg(hellodata, targetStruct_forFakeUDPServer)
 	if err != nil {
 		t.Log("failed in write to ", fakeServerEndLocalServer.AddrStr(), err)
 		t.FailNow()
@@ -327,7 +337,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 
 	t.Log("client write hello success")
 
-	bs, _, err := wrc.ReadMsgFrom()
+	bs, _, err := wrc.ReadMsg()
 	if !bytes.Equal(bs, replydata) {
 		t.Log("!bytes.Equal(world[:], replydata) ", bs, replydata, err)
 		t.FailNow()
@@ -349,7 +359,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 
 		t.Log("rand generated", len(longbs), longbs[:5])
 
-		err = wrc.WriteMsgTo(longbs, targetStruct_forFakeUDPServer)
+		err = wrc.WriteMsg(longbs, targetStruct_forFakeUDPServer)
 		if err != nil {
 			t.Log("failed in write long data to ", fakeServerEndLocalServer.AddrStr(), err)
 			t.FailNow()
@@ -357,7 +367,7 @@ func TestUDP(protocol string, version int, proxyPort string, use_multi int, t *t
 
 		t.Log("data written")
 
-		bs, _, _ := wrc.ReadMsgFrom()
+		bs, _, _ := wrc.ReadMsg()
 		if err != nil {
 			t.Log("ReadFull err ", err)
 			t.FailNow()

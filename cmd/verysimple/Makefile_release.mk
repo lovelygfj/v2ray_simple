@@ -1,0 +1,86 @@
+# 本文件仅限在linux上运行
+# 我们在github action里用到了本文件，用于 自动编译发布包。
+
+# 我们这里规定，使用该 Makefile_release.mk 进行make时，必须要明确指明 BUILD_VERSION。因为是发布包嘛。
+
+#BUILD_VERSION   := vx.x.x-beta.x 这个将在github action里自动通过tag配置, 参见 .github/workflows/build_release.yml
+
+prefix :=verysimple
+
+cmd:=go build -tags "$(tags)"  -trimpath -ldflags "-X 'main.Version=${BUILD_VERSION}' -s -w -buildid="  -o
+
+
+ifdef PACK
+define compile
+	CGO_ENABLED=0 GOOS=$(2) GOARCH=$(3) GOARM=$(5) $(cmd) ${prefix}_$(1)
+	mv ${prefix}_$(1) verysimple$(4)
+	tar -cJf ${prefix}_$(1).tar.xz verysimple$(4) -C ../../ examples/
+	rm verysimple$(4)
+endef
+
+else
+
+define compile
+	CGO_ENABLED=0 GOOS=$(2) GOARCH=$(3) GOARM=$(5) $(cmd) ${prefix}_$(1)$(4)
+endef
+endif
+
+
+main: linux_amd64 linux_arm64 android_arm64 macos macm win10 win10_arm
+
+extra: linux_arm32_v5 linux_arm32_v6 linux_arm32_v7 linux_mips64 linux_mips linux_s390x linux_riscv64 win32
+
+# 注意调用参数时，逗号前后不能留空格
+# 关于arm版本号 https://github.com/goreleaser/goreleaser/issues/36
+
+linux_amd64:
+	$(call compile,linux_amd64,linux,amd64)
+
+linux_arm64:
+	$(call compile,linux_arm64,linux,arm64)
+
+linux_arm32_v5:	#某些路由器需要
+	$(call compile,linux_arm32_v5,linux,arm,,5)
+
+linux_arm32_v6:
+	$(call compile,linux_arm32_v6,linux,arm,,6)
+
+linux_arm32_v7:
+	$(call compile,linux_arm32_v7a,linux,arm,,7)
+
+linux_mips64:
+	$(call compile,linux_mips64,linux,mips64)
+
+linux_mips:
+	$(call compile,linux_mips,linux,mips)
+
+linux_s390x:
+	$(call compile,linux_s390x,linux,s390x)
+
+linux_riscv64:
+	$(call compile,linux_riscv64,linux,riscv64)
+
+android_arm64:
+	$(call compile,android_arm64,android,arm64)
+
+macos:
+	$(call compile,macOS_intel,darwin,amd64)
+
+macm:
+	$(call compile,macOS_apple,darwin,arm64)
+
+win32:
+	$(call compile,win32,windows,386,.exe)
+
+win10:
+	$(call compile,win10,windows,amd64,.exe)
+
+win10_arm:
+	$(call compile,win10_arm64,windows,arm64,.exe)
+
+
+clean:
+	rm -f ${prefix}
+	rm -f ${prefix}.exe
+	rm -f ${prefix}_*
+	rm -f *.tar.xz

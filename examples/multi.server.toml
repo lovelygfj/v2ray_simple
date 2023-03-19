@@ -4,10 +4,19 @@ default_uuid = "a684455c-b14f-11ea-bf0d-42010aaa0003"   # 这个除了作为默�
 # 每个listen 可以只配置users来配置用户列表，然后 这个default_uuid 会作为 每个listen 的uuid 的值。
 # 这样作为管理员，每个listen自己都能用自己的 账户连上，不必再额外对每一个listen 添加一遍 自己的账户。
 
+# [apiServer]            # v1.2.5开始, apiServer配置单独在一项中配置
+# enable = true         # 默认为false
+# plain = false         # 是否使用明文http, 默认false
+# admin_pass = "i_love_verysimple"
+# addr = "127.0.0.1:8080"
+# key = "/home/vs/key"  # 若不用明文http, 可配置tls证书, 若不给出, vs会自动生成随机证书
+# cert = "/home/vs/cert"
+# prefix = "/myapi"
+
 [[listen]]
 tag = "my_vlesss1"
 protocol = "vlesss"
-host = "0.0.0.0"
+ip = "0.0.0.0"
 version = -1    # 支持所有vless版本
 port = 4433
 insecure = true
@@ -16,6 +25,9 @@ cert = "cert.pem"
 key = "cert.key"
 users = [ {user = "a684455c-b14f-11ea-bf0d-42010aaa0004"} , {user = "a684455c-b14f-11ea-bf0d-42010aaa0005"} ]
 
+# extra.tls_rejectUnknownSni = true # 这个开启了的话，防御效果更佳, 不过, 这要求你有真实证书
+
+#sockopt.bbr = true #用户空间的bbr拥塞控制, 仅限linux, see issue #237
 
 [[listen]]
 tag = "my_ws1"
@@ -25,7 +37,7 @@ port = 4434
 insecure = true
 cert = "cert.pem"
 key = "cert.key"
-advancedLayer = "ws"
+adv = "ws"
 path = "/ohmygod_verysimple_is_very_simple"
 fallback = 80
 
@@ -38,7 +50,7 @@ port = 4435
 insecure = true
 cert = "cert.pem"
 key = "cert.key"
-advancedLayer = "grpc"
+adv = "grpc"
 path = "ohmygod_verysimple_is_very_simple"
 
 #最简单情况下，服务端 不需要给出任何dial，不给出的话实际上程序就会自动加一个 direct。
@@ -76,3 +88,12 @@ protocol = "reject"
 [[route]]
 toTag = "my_special_tag_for_this_guy"
 user = ["a684455c-b14f-11ea-bf0d-42010aaa0004"] #通过 listen 所得到 的 user的不同 来分流
+
+
+[[dial]]
+tag = "my_special_direct"
+protocol = "direct"
+network = "dual"
+sendThrough = "tcp:127.0.0.1:80\nudp:127.0.0.1:12345"
+# 这里展示了一种特殊用法，direct设置sendThrough, 就能限制它发送数据的端口, 而且tcp和udp可以设为不同的地址
+# 注意这个写法 "tcp:ip:port\nudp:ip:port"

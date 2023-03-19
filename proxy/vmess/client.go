@@ -13,8 +13,8 @@ import (
 	"math/rand"
 	"net"
 	"net/url"
-	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/e1732a364fed/v2ray_simple/netLayer"
@@ -23,65 +23,65 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-const systemAutoWillUseAes = runtime.GOARCH == "amd64" || runtime.GOARCH == "s390x" || runtime.GOARCH == "arm64"
-
 func init() {
 	proxy.RegisterClient(Name, ClientCreator{})
 }
 
-type ClientCreator struct{}
+const Security_confStr string = "vmess_security"
 
-func (ClientCreator) NewClientFromURL(url *url.URL) (proxy.Client, error) {
-	uuidStr := url.User.Username()
-	uuid, err := utils.StrToUUID(uuidStr)
-	if err != nil {
-		return nil, err
-	}
-
-	query := url.Query()
-
-	security := query.Get("security")
-
-	c := &Client{}
-	c.V2rayUser = utils.V2rayUser(uuid)
-
-	c.opt = OptChunkStream
-	if err = c.specifySecurityByStr(security); err != nil {
-		return nil, err
-	}
-
-	return c, nil
-}
-
-func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
-	uuid, err := utils.StrToUUID(dc.Uuid)
-	if err != nil {
-		return nil, err
-	}
-	c := &Client{}
-	c.V2rayUser = utils.V2rayUser(uuid)
-	c.opt = OptChunkStream
-
-	hasSetSecurityByExtra := false
+func GetEncryptAlgo(dc *proxy.DialConf) (result string) {
 
 	if len(dc.Extra) > 0 {
-		if thing := dc.Extra["vmess_security"]; thing != nil {
+		if thing := dc.Extra[Security_confStr]; thing != nil {
 			if str, ok := thing.(string); ok {
 
-				err = c.specifySecurityByStr(str)
-
-				if err == nil {
-					hasSetSecurityByExtra = true
-				} else {
-					return nil, err
-				}
+				result = str
 
 			}
 		}
 	}
 
-	if !hasSetSecurityByExtra {
-		c.specifySecurityByStr("")
+	if dc.EncryptAlgo != "" {
+		result = dc.EncryptAlgo
+	}
+
+	return result
+}
+
+type ClientCreator struct{ proxy.CreatorCommonStruct }
+
+func (ClientCreator) URLToDialConf(url *url.URL, dc *proxy.DialConf, format int) (*proxy.DialConf, error) {
+	if format != proxy.UrlStandardFormat {
+		return dc, utils.ErrUnImplemented
+	}
+
+	if dc == nil {
+		dc = &proxy.DialConf{}
+		uuidStr := url.User.Username()
+
+		dc.UUID = uuidStr
+
+	}
+
+	return dc, nil
+}
+
+func (ClientCreator) NewClient(dc *proxy.DialConf) (proxy.Client, error) {
+	uuid, err := utils.StrToUUID(dc.UUID)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{
+		use_mux: dc.Mux,
+	}
+	c.V2rayUser = utils.V2rayUser(uuid)
+	c.opt = OptChunkStream
+
+	var ea string = GetEncryptAlgo(dc)
+
+	if err := c.specifySecurityByStr(ea); err != nil {
+
+		return nil, err
 	}
 
 	return c, nil
@@ -93,6 +93,21 @@ type Client struct {
 
 	opt      byte
 	security byte
+	use_mux  bool
+}
+
+func (*Client) GetCreator() proxy.ClientCreator {
+	return ClientCreator{}
+}
+
+func (c *Client) HasInnerMux() (int, string) {
+	if c.use_mux {
+		return 2, "simplesocks"
+
+	} else {
+		return 0, ""
+
+	}
 }
 
 func (c *Client) specifySecurityByStr(security string) error {
@@ -102,8 +117,8 @@ func (c *Client) specifySecurityByStr(security string) error {
 		c.security = SecurityAES128GCM
 	case "chacha20-poly1305":
 		c.security = SecurityChacha20Poly1305
-	case "auto":
-		if systemAutoWillUseAes {
+	case "auto", "": //这里我们为了保护用户，当字符串为空时，依然设为auto，而不是zero
+		if utils.SystemAutoUseAes {
 			c.security = SecurityAES128GCM
 		} else {
 			c.security = SecurityChacha20Poly1305
@@ -112,7 +127,10 @@ func (c *Client) specifySecurityByStr(security string) error {
 	case "none":
 		c.security = SecurityNone
 
-	case "", "zero": // NOTE: use basic format when no method specified.
+	case "zero", "0":
+
+		// NOTE: use basic format when no method specified.
+		// 注意，BasicFormat 只用于向前兼容，本作的vmess的服务端并不支持 注意，BasicFormat
 
 		c.opt = OptBasicFormat
 		c.security = SecurityNone
@@ -160,21 +178,27 @@ func (c *Client) commonHandshake(underlay net.Conn, firstPayload []byte, target 
 
 	var err error
 
-	// Request
-	if target.IsUDP() {
-		err = conn.handshake(CmdUDP, firstPayload)
-		conn.theTarget = target
+	if c.use_mux {
+		err = conn.handshake(CMDMux_VS, firstPayload)
+		conn.use_mux = true
 
 	} else {
-		err = conn.handshake(CmdTCP, firstPayload)
+		// Request
+		if target.IsUDP() {
+			err = conn.handshake(CmdUDP, firstPayload)
+			conn.theTarget = target
 
+		} else {
+			err = conn.handshake(CmdTCP, firstPayload)
+
+		}
 	}
 
 	if err != nil {
 		return nil, err
 	}
 
-	return conn, err
+	return conn, nil
 }
 
 // ClientConn is a connection to vmess server
@@ -201,18 +225,22 @@ type ClientConn struct {
 	dataWriter io.Writer
 
 	vmessout []byte
+
+	use_mux bool
+	RM      sync.Mutex //用于mux，因为可能同一时间多个写入发生
+	WM      sync.Mutex
 }
 
 func (c *ClientConn) CloseConnWithRaddr(_ netLayer.Addr) error {
 	return c.Conn.Close()
 }
 
-//return false; vmess 标准 是不支持 fullcone的，和vless v0相同
+// return false; vmess 标准 是不支持 fullcone的，和vless v0相同
 func (c *ClientConn) Fullcone() bool {
 	return false
 }
 
-func (c *ClientConn) ReadMsgFrom() (bs []byte, target netLayer.Addr, err error) {
+func (c *ClientConn) ReadMsg() (bs []byte, target netLayer.Addr, err error) {
 	bs = utils.GetPacket()
 	var n int
 	n, err = c.Read(bs)
@@ -226,7 +254,7 @@ func (c *ClientConn) ReadMsgFrom() (bs []byte, target netLayer.Addr, err error) 
 	return
 }
 
-func (c *ClientConn) WriteMsgTo(b []byte, _ netLayer.Addr) error {
+func (c *ClientConn) WriteMsg(b []byte, _ netLayer.Addr) error {
 	_, e := c.Write(b)
 	return e
 }
@@ -317,21 +345,25 @@ func (vc *ClientConn) aead_decodeRespHeader() error {
 	}
 
 	if len(buf) < 4 {
-		return errors.New("unexpected buffer length")
+		return errors.New("vless aead_decodeRespHeader unexpected buffer length")
 	}
 
 	if buf[0] != vc.reqRespV {
-		return errors.New("unexpected response header")
+		return errors.New("vless aead_decodeRespHeader unexpected response header")
 	}
 
 	if buf[2] != 0 {
-		return errors.New("dynamic port is not supported now")
+		return errors.New("vless aead_decodeRespHeader, dynamic port is not supported now")
 	}
 
 	return nil
 }
 
 func (c *ClientConn) Write(b []byte) (n int, err error) {
+	if c.use_mux {
+		c.WM.Lock()
+		defer c.WM.Unlock()
+	}
 	if c.dataWriter != nil {
 		return c.dataWriter.Write(b)
 	}
@@ -394,6 +426,12 @@ func (c *ClientConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *ClientConn) Read(b []byte) (n int, err error) {
+
+	if c.use_mux {
+		c.RM.Lock()
+		defer c.RM.Unlock()
+	}
+
 	if c.dataReader != nil {
 		return c.dataReader.Read(b)
 	}

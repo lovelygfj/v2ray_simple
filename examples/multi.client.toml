@@ -15,18 +15,29 @@ admin_pass = "adfadfadfadfa"	# 用于 api服务器的登陆密码.只要给出, 
 
 # dns解析的默认方式是先查A记录，没有A再查AAAA记录 (先查4后查6)
 
-#strategy = 60 # 0表示默认, 4表示先查ip4后查ip6, 6表示先查6后查4; 40表示只查ipv4, 60 表示只查ipv6
+# strategy = 60
+# strategy 为 dns查询时 针对ipv4 和 v6 到底先查谁 的一个策略配置。
+# 0表示默认, 4表示先查ip4后查ip6, 6表示先查6后查4; 40表示只查ipv4, 60 表示只查ipv6。
 # 在只查 ipv6时， 有可能查无结果, 此时将依然会把域名原封不动发送到节点, 而不是断开连接.
 
-# servers 列表中的 第一项 将被作为 默认 dns 服务器, 必须保证能连上，所以建议填写确实能连上的dns服务器，否则可能出问题
+# ttl_strategy = 1
+# ttl_strategy 为缓存过期时间的配置，小白暂时可以不管. 0表示默认(记录永不过期), 1表示严格按照dns查询到的TTL, 其他值则为自定义的秒数，然后程序会按这个时间周期性清理缓存。 (不可为负）
+
+# listen = "udp://127.0.0.1:8053" 	# 如果listen给出, 则会开启一个dns监听, 你可以配置系统dns指向这里. 
+
+# 如果没有listen，则 vs的dns模块只用于 代理中传来域名信息的解析, 与外部无关
+
+# listen与 下面配置的dokodemo方法有所不同, dokodemo只是全转发, 不参照我们配置的dns解析, 而listen则完全走 servers 和 hosts 的配置。
 
 servers = [
 	"udp://114.114.114.114:53",      # 如果把该url指向我们dokodemo监听的端口，就可以达到通过节点请求dns的目的.
-	#"udp://127.0.0.1:63782",      # 如这一行 就是通过我们节点请求dns
+	#"udp://127.0.0.1:63782",      # 如这一行 就是通过下面配置的dokodemo端口, 经过我们节点请求dns
 	
 	#{ addr = "udp://8.8.8.8:53", domain = [ "google.com" ] },	# 还可以为特定域名指定特定服务器
 	#{ addr = "tls://223.5.5.5:853", domain = [ "twitter.com" ] }	# 还可以 用 dns over tls
 ]
+
+# servers 列表中的 第一项 将被作为 默认 dns 服务器, 必须保证能连上，所以建议填写确实能连上的dns服务器，否则可能出问题
 
 [dns.hosts]     # 自己定义的dns解析
 "www.myfake.com" = "11.22.33.44"
@@ -63,7 +74,7 @@ host = "127.0.0.1"
 port = 4433
 version = 0    
 insecure = true 
-utls = true   
+tls_type = "utls"   
 
 
 [[dial]]
@@ -72,9 +83,10 @@ protocol = "vlesss"
 host = "127.0.0.1"
 port = 4434
 insecure = true
-utls = true
-advancedLayer = "ws"
+tls_type = "utls"
+adv = "ws"
 path = "/ohmygod_verysimple_is_very_simple" 
+#sendThrough = "63.77.15.11:0"	# dial可以设置 sendThrough为自己的某一个ip地址，来达到选择特定的ip来拨号的目的。常用与 服务器有ipv4和ipv6双栈，而因为某些原因需要单独使用 v4 或者v6  的情况。 （这里给出的示例ip是假的，请改为你自己的ip地址）
 
 
 [[dial]]
@@ -84,8 +96,8 @@ host = "127.0.0.1"
 port = 4435
 version = 0
 insecure = true
-utls = true
-advancedLayer = "grpc"
+tls_type = "utls"
+adv = "grpc"
 path = "ohmygod_verysimple_is_very_simple"
 
 
@@ -145,7 +157,11 @@ toTag = "my_ws1"
 
 # 如果匹配了app.mycountry, 则数据会直接被直连.
 # 其它分流匹配示例：
-# ip = ["0.0.0.0/8","10.0.0.0/8","fe80::/10","10.0.0.1"]
+
+# 绕过局域网
+#[[route]]
+#ip = ["0.0.0.0/8","10.0.0.0/8","fe80::/10","172.16.0.0/12","192.168.0.0/16"]
+#toTag = "direct"
 
 # 关于ip中使用cidr匹配ipv6，可以参考 https://www.mediawiki.org/wiki/Help:Range_blocks/IPv6
 # 比如要想路由所有的ipv6地址，可用 ip = ["::/0"]

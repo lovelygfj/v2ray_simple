@@ -18,11 +18,11 @@ func init() {
 	proxy.RegisterServer(Name, &ServerCreator{})
 }
 
-type ServerCreator struct{}
+type ServerCreator struct{ proxy.CreatorCommonStruct }
 
-//如果 lc.Version==0, 则只支持 v0.
+// 如果 lc.Version==0, 则只支持 v0.
 func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
-	uuidStr := lc.Uuid
+	uuidStr := lc.UUID
 	onlyV0 := lc.Version == 0
 
 	var s *Server
@@ -45,10 +45,23 @@ func (ServerCreator) NewServer(lc *proxy.ListenConf) (proxy.Server, error) {
 
 }
 
-//如果 v=0, 则只支持 v0.
-func (ServerCreator) NewServerFromURL(url *url.URL) (proxy.Server, error) {
-	uuidStr := url.User.Username()
-	return newServerWithConf(uuidStr, url.Query().Get("v") == "0")
+// 如果 v=0, 则只支持 v0.
+func (ServerCreator) URLToListenConf(url *url.URL, lc *proxy.ListenConf, format int) (*proxy.ListenConf, error) {
+
+	switch format {
+	case proxy.UrlStandardFormat:
+		if lc == nil {
+			lc = &proxy.ListenConf{}
+
+			uuidStr := url.User.Username()
+			lc.UUID = uuidStr
+		}
+
+		return lc, nil
+	default:
+		return lc, utils.ErrUnImplemented
+	}
+
 }
 
 func newServer(onlyV0 bool) *Server {
@@ -72,8 +85,8 @@ func newServerWithConf(uuid string, onlyV0 bool) (*Server, error) {
 	return s, nil
 }
 
-//Server 同时支持vless v0 和 v1
-//实现 proxy.UserServer 以及 tlsLayer.UserHaser
+// Server 同时支持vless v0 和 v1
+// 实现 proxy.UserServer 以及 tlsLayer.UserHaser
 type Server struct {
 	proxy.Base
 
@@ -100,7 +113,7 @@ func (s *Server) Name() string { return Name }
 // 返回的bytes.Buffer 是用于 回落使用的，内含了整个读取的数据;不回落时不要使用该Buffer
 func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLayer.MsgConn, targetAddr netLayer.Addr, returnErr error) {
 
-	if err := proxy.SetCommonReadTimeout(underlay); err != nil {
+	if err := netLayer.SetCommonReadTimeout(underlay); err != nil {
 		returnErr = err
 		return
 	}
@@ -114,7 +127,7 @@ func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLaye
 
 	wholeReadLen, err := underlay.Read(readbs)
 	if err != nil {
-		returnErr = utils.ErrInErr{ErrDesc: "read err", ErrDetail: err, Data: wholeReadLen}
+		returnErr = utils.ErrInErr{ErrDesc: "Vless read err", ErrDetail: err, Data: wholeReadLen}
 		return
 	}
 
@@ -122,7 +135,7 @@ func (s *Server) Handshake(underlay net.Conn) (tcpConn net.Conn, msgConn netLaye
 		//根据下面回答，HTTP的最小长度恰好是16字节，但是是0.9版本。1.0是18字节，1.1还要更长。总之我们可以直接不返回fallback地址
 		//https://stackoverflow.com/questions/25047905/http-request-minimum-size-in-bytes/25065089
 
-		returnErr = utils.ErrInErr{ErrDesc: "fallback, msg too short", Data: wholeReadLen}
+		returnErr = utils.ErrInErr{ErrDesc: "Vless msg too short", Data: wholeReadLen}
 		return
 	}
 
@@ -149,7 +162,7 @@ realPart:
 	version := auth[0]
 	if version > 1 {
 
-		returnErr = utils.ErrInErr{ErrDesc: "invalid version ", ErrDetail: utils.ErrInvalidData, Data: version}
+		returnErr = utils.ErrInErr{ErrDesc: "Vless Invalid version ", ErrDetail: utils.ErrInvalidData, Data: version}
 		goto errorPart
 
 	}
@@ -160,7 +173,7 @@ realPart:
 
 	if s.AuthUserByBytes(thisUUIDBytes[:]) != nil {
 	} else {
-		returnErr = utils.ErrInErr{ErrDesc: "invalid user ", ErrDetail: utils.ErrInvalidData, Data: utils.UUIDToStr(thisUUIDBytes[:])}
+		returnErr = utils.ErrInErr{ErrDesc: "Vless Invalid user ", ErrDetail: utils.ErrInvalidData, Data: utils.UUIDToStr(thisUUIDBytes[:])}
 		goto errorPart
 	}
 
@@ -174,7 +187,7 @@ realPart:
 		if addonLenByte != 0 {
 			//v2ray的vless中没有对应的任何处理。
 			//v2ray 的 vless 虽然有一个没用的Flow，但是 EncodeBodyAddons里根本没向里写任何数据。所以理论上正常这部分始终应该为0
-			if ce := utils.CanLogWarn("potential illegal client"); ce != nil {
+			if ce := utils.CanLogWarn("Vless potential illegal client"); ce != nil {
 				ce.Write(zap.Uint8("addonLenByte", addonLenByte))
 			}
 
@@ -201,7 +214,7 @@ realPart:
 
 	if err != nil {
 
-		returnErr = utils.ErrInErr{ErrDesc: "read commandByte failed ", ErrDetail: err}
+		returnErr = utils.ErrInErr{ErrDesc: "Vless read commandByte failed ", ErrDetail: err}
 		goto errorPart
 	}
 
@@ -228,7 +241,7 @@ realPart:
 		targetAddr, err = netLayer.V2rayGetAddrFrom(readbuf)
 		if err != nil {
 
-			returnErr = utils.ErrInErr{ErrDesc: "fallback, reason 4", ErrDetail: err}
+			returnErr = utils.ErrInErr{ErrDesc: "Vless parse addr failed", ErrDetail: err}
 			goto errorPart
 		}
 
@@ -239,30 +252,32 @@ realPart:
 
 	default:
 
-		returnErr = utils.ErrInErr{ErrDesc: "invalid command ", ErrDetail: utils.ErrInvalidData, Data: commandByte}
+		returnErr = utils.ErrInErr{ErrDesc: "Vless Invalid command ", ErrDetail: utils.ErrInvalidData, Data: commandByte}
 		goto errorPart
 	}
 
 	if ismux {
-		mh := &proxy.MuxMarkerConn{
+		mm := &proxy.UserReadWrapper{
+			Mux:  true,
+			User: utils.V2rayUser(thisUUIDBytes),
 			ReadWrapper: netLayer.ReadWrapper{
 				Conn: underlay,
 			},
 		}
 
 		if l := readbuf.Len(); l > 0 {
-			mh.RemainFirstBufLen = l
-			mh.OptionalReader = io.MultiReader(readbuf, underlay)
+			mm.RemainFirstBufLen = l
+			mm.OptionalReader = io.MultiReader(readbuf, underlay)
 		}
 
-		return mh, nil, targetAddr, nil
+		return mm, nil, targetAddr, nil
 	}
 
 	if isudp {
 		return nil, &UDPConn{
 			Conn:              underlay,
 			V2rayUser:         thisUUIDBytes,
-			version:           int(version),
+			version:           version,
 			optionalReader:    io.MultiReader(readbuf, underlay),
 			raddr:             targetAddr,
 			remainFirstBufLen: readbuf.Len(),
@@ -271,19 +286,31 @@ realPart:
 		}, targetAddr, nil
 
 	} else {
+		//返回包装过的Conn, 而不是底层underlay, 除了需要读firstpayload之外, 还为了要支持user分流
 		uc := &UserTCPConn{
 			Conn:              underlay,
 			V2rayUser:         thisUUIDBytes,
-			version:           int(version),
+			version:           version,
 			optionalReader:    io.MultiReader(readbuf, underlay),
 			remainFirstBufLen: readbuf.Len(),
 			underlayIsBasic:   netLayer.IsBasicConn(underlay),
 			isServerEnd:       true,
 		}
 
-		if r, rr, mr := netLayer.IsConnGoodForReadv(underlay); r > 0 {
+		if r, rr := netLayer.IsConnGoodForReadv(underlay); r != 0 {
+
+			//一般而言，裸奔时， readvType == -1
+			// 使用普通tls时， readvType ==0
+			//使用 shadowTls 时, readvType == 1
+
 			uc.rr = rr
-			uc.mr = mr
+			uc.readvType = r
+			if r == 1 {
+				uc.br = underlay.(utils.BuffersReader)
+			}
+		}
+		if mw, ok := underlay.(utils.MultiWriter); ok {
+			uc.mw = mw
 		}
 		return uc, nil, targetAddr, nil
 
